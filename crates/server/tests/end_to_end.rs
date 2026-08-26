@@ -76,7 +76,7 @@ fn the_management_tool_reads_real_status_over_the_admin_socket() {
     let port = free_port();
     let socket = std::env::temp_dir().join(format!("synctus-admin-{port}.sock"));
 
-    let child = ProcCommand::new(env!("CARGO_BIN_EXE_synctus-server"))
+    let mut child = ProcCommand::new(env!("CARGO_BIN_EXE_synctus-server"))
         .env("SYNCTUS_BIND", format!("127.0.0.1:{port}"))
         .env("SYNCTUS_LOG", "synctus_server=warn")
         // A fixed path is required so the test can connect; envs must use the

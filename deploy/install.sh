@@ -174,16 +174,32 @@ if [ -n "$CTL_BIN" ]; then
 fi
 say "  已安装  synctus-server$([ -n "$CTL_BIN" ] && echo ', synctus')"
 
+# Whether a group with the given name exists, read straight from /etc/group so
+# the check does not depend on `getent`, whose presence varies across busybox
+# builds.
+group_exists() {
+    awk -F: -v g="$1" '$1 == g { found = 1 } END { exit !found }' /etc/group
+}
+
 # A service account with no login shell and no home: the relay needs a network
 # socket and nothing else.
 if [ "$INIT" != "none" ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
     if command -v useradd >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /sbin/nologin "$SERVICE_USER" 2>/dev/null || true
-    elif command -v adduser >/dev/null 2>&1; then
-        # busybox adduser, as on Alpine.
-        adduser -S -D -H -s /sbin/nologin "$SERVICE_USER" 2>/dev/null || true
+    else
+        # busybox (Alpine). Create the group explicitly first: some busybox
+        # builds do not auto-create a same-named group, and OpenRC's checkpath
+        # refuses to start the service when it cannot resolve the owner.
+        addgroup -S "$SERVICE_USER" 2>/dev/null || true
+        adduser -S -H -s /sbin/nologin -G "$SERVICE_USER" "$SERVICE_USER" 2>/dev/null || true
     fi
-    id "$SERVICE_USER" >/dev/null 2>&1 && say "  已创建  服务账号 $SERVICE_USER"
+
+    if id "$SERVICE_USER" >/dev/null 2>&1 && group_exists "$SERVICE_USER"; then
+        say "  已创建  服务账号 $SERVICE_USER"
+    else
+        warn "无法创建服务账号 $SERVICE_USER，将用 root 运行（可在安装后手动修复）"
+        SERVICE_USER="root"
+    fi
 fi
 
 # ------------------------------------------------------------------ config
@@ -238,7 +254,6 @@ if id "$SERVICE_USER" >/dev/null 2>&1; then
     chown -R "root:$SERVICE_USER" "$CONFIG_DIR" 2>/dev/null || true
     chmod 0750 "$CONFIG_DIR" 2>/dev/null || true
 fi
-
 # ------------------------------------------------------------------ service
 
 case "$INIT" in
@@ -332,10 +347,16 @@ depend() {
 }
 
 start_pre() {
-    # The admin socket directory. Recreated on every start because /run is
-    # cleared on reboot.
-    checkpath --directory --owner "$SERVICE_USER:$SERVICE_USER" --mode 0750 /run/synctus
-    checkpath --file --owner "$SERVICE_USER:$SERVICE_USER" --mode 0640 /var/log/synctus-server.log
+    # /run is tmpfs and cleared on reboot, so the admin-socket directory is
+    # recreated on every start.
+    #
+    # The \`|| true\` is deliberate: a failure to resolve the owner (or anything
+    # else) must not abort the start and leave the service dead. At worst the
+    # socket falls back to root ownership and \`synctus\` still works when run
+    # with sudo.
+    checkpath --directory --owner "$SERVICE_USER:$SERVICE_USER" --mode 0750 /run/synctus 2>/dev/null || true
+    checkpath --file --owner "$SERVICE_USER:$SERVICE_USER" --mode 0640 /var/log/synctus-server.log 2>/dev/null || true
+    return 0
 }
 EOF
     chmod 0755 /etc/init.d/synctus-server
