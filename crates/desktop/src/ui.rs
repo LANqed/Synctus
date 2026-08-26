@@ -1,9 +1,12 @@
 //! The egui front-end: the always-on-top overlay and the settings window.
 //!
-//! The overlay is deliberately tiny — an avatar, the peer's presence and one line
-//! of detail. Left-clicking the avatar pokes the peer; right-clicking opens the
-//! same menu as the tray, so the tray is a convenience rather than the only way
-//! in.
+//! The overlay is deliberately small — an avatar, the peer's presence, one line of
+//! detail and the two focus numbers side by side. Left-clicking the avatar pokes
+//! the peer; right-clicking opens the same menu as the tray, so the tray is a
+//! convenience rather than the only way in.
+//!
+//! The focus comparison is the part that does the actual work. Seeing "我 50 / TA
+//! 75" is what makes someone start a round, far more than any notification.
 
 use eframe::egui;
 use std::time::Instant;
@@ -13,10 +16,11 @@ use synctus_core::model::{NudgeKind, PomodoroPhase, Presence};
 
 use crate::app::{App, UiRequest};
 
-/// Overlay size. Wide enough for `Artist - Title` at the default font size.
-pub const OVERLAY_SIZE: [f32; 2] = [260.0, 96.0];
+/// Overlay size. Wide enough for `Artist - Title` at the default font size, tall
+/// enough for the focus comparison row.
+pub const OVERLAY_SIZE: [f32; 2] = [280.0, 124.0];
 /// Settings window size.
-pub const SETTINGS_SIZE: [f32; 2] = [520.0, 560.0];
+pub const SETTINGS_SIZE: [f32; 2] = [520.0, 600.0];
 
 /// Transient UI state that does not belong in [`App`].
 #[derive(Default)]
@@ -33,6 +37,7 @@ pub struct UiState {
 pub enum SettingsTab {
     #[default]
     Connection,
+    Accountability,
     Privacy,
     Pomodoro,
     Todos,
@@ -59,7 +64,7 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
                 ui.add_space(6.0);
 
                 ui.vertical(|ui| {
-                    // Line 1: name and presence.
+                    // Line 1: name, presence, and the nag button when earned.
                     ui.horizontal(|ui| {
                         let name = app
                             .peer()
@@ -82,6 +87,26 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
                             )
                             .on_hover_text(connection_hint(&app.conn));
                         }
+
+                        // Caught them: offer the nag right where the evidence is,
+                        // rather than buried in a menu.
+                        if app.peer_is_slacking() {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button(
+                                            egui::RichText::new("👀 抓到了")
+                                                .color(egui::Color32::from_rgb(0xef, 0x53, 0x50)),
+                                        )
+                                        .on_hover_text("对方正在专注，却开着摸鱼应用")
+                                        .clicked()
+                                    {
+                                        request = Some(UiRequest::Nudge(NudgeKind::Nag));
+                                    }
+                                },
+                            );
+                        }
                     });
 
                     // Line 2: what the peer is doing.
@@ -91,6 +116,18 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
                     ui.label(egui::RichText::new(peer_meta(app, now)).small().weak());
                 });
             });
+
+            // The focus comparison: the reason this tool exists.
+            focus_row(ui, app);
+
+            // My own distraction, called out so it is impossible to ignore.
+            if let Some(app_name) = app.distracted_by.clone() {
+                ui.label(
+                    egui::RichText::new(format!("👀 你在专注中开着 {app_name}"))
+                        .small()
+                        .color(egui::Color32::from_rgb(0xef, 0x53, 0x50)),
+                );
+            }
 
             // Recent poke, shown briefly.
             if let Some((nudge, at)) = &app.last_nudge {
@@ -127,6 +164,96 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
     }
 
     request
+}
+
+/// Today's focus minutes for both people, as a bar plus numbers.
+///
+/// Two bars rather than one shared scale: the goals may differ, and what matters
+/// is each person's progress against their own target, with the other's number
+/// visible for comparison.
+fn focus_row(ui: &mut egui::Ui, app: &App) {
+    let goal = app.cfg.accountability.daily_goal_min;
+    if goal == 0 {
+        // Goals disabled: the row would be an empty bar, so it is omitted.
+        return;
+    }
+
+    let (mine, theirs) = app.focus_comparison();
+    let streak = app.my_streak();
+
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        // Mine.
+        let progress = app.my_goal_progress();
+        let done = mine >= goal;
+        ui.add(
+            egui::ProgressBar::new(progress)
+                .desired_width(88.0)
+                .desired_height(10.0)
+                .fill(if done {
+                    egui::Color32::from_rgb(0x4c, 0xaf, 0x50)
+                } else {
+                    egui::Color32::from_rgb(0x42, 0xa5, 0xf5)
+                }),
+        )
+        .on_hover_text(format!("我：{mine}/{goal} 分钟"));
+
+        ui.label(
+            egui::RichText::new(format!("我 {mine}"))
+                .small()
+                .color(if done {
+                    egui::Color32::from_rgb(0x4c, 0xaf, 0x50)
+                } else {
+                    ui.visuals().text_color()
+                }),
+        );
+
+        // Theirs, when there is a peer to compare against.
+        if let Some(peer) = app.peer() {
+            ui.separator();
+            let their_goal = peer.goal_min;
+            let their_progress = peer.goal_progress();
+            let their_done = peer.goal_met();
+
+            ui.add(
+                egui::ProgressBar::new(their_progress)
+                    .desired_width(88.0)
+                    .desired_height(10.0)
+                    .fill(if their_done {
+                        egui::Color32::from_rgb(0x4c, 0xaf, 0x50)
+                    } else {
+                        egui::Color32::from_rgb(0x9e, 0x9e, 0x9e)
+                    }),
+            )
+            .on_hover_text(if their_goal > 0 {
+                format!("{}：{theirs}/{their_goal} 分钟", peer.name)
+            } else {
+                format!("{}：{theirs} 分钟（未设目标）", peer.name)
+            });
+
+            ui.label(egui::RichText::new(format!("TA {theirs}")).small().weak());
+
+            if peer.streak_days > 1 {
+                ui.label(
+                    egui::RichText::new(format!("🔥{}", peer.streak_days))
+                        .small()
+                        .weak(),
+                )
+                .on_hover_text(format!("对方连续达标 {} 天", peer.streak_days));
+            }
+        }
+
+        if streak > 1 {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("🔥{streak}"))
+                        .small()
+                        .color(egui::Color32::from_rgb(0xff, 0x8f, 0x00)),
+                )
+                .on_hover_text(format!("我连续达标 {streak} 天"));
+            });
+        }
+    });
 }
 
 /// The peer avatar: a coloured disc with the platform badge.
@@ -194,10 +321,65 @@ pub fn menu(ui: &mut egui::Ui, app: &App, state: &mut UiState) -> Option<UiReque
             .small()
             .weak(),
     );
+
+    // Today's numbers at the top of the menu: it is the first thing worth seeing.
+    let goal = app.cfg.accountability.daily_goal_min;
+    if goal > 0 {
+        let (mine, theirs) = app.focus_comparison();
+        ui.label(
+            egui::RichText::new(format!(
+                "今日专注　我 {mine} / TA {theirs}　目标 {goal} 分钟"
+            ))
+            .small(),
+        );
+    }
     ui.separator();
 
-    ui.menu_button("互动", |ui| {
+    // The two accountability actions are promoted out of the submenu: burying the
+    // nag behind two clicks is how it stops being used.
+    let nag_hint = if app.peer_is_slacking() {
+        "对方正在专注，却开着摸鱼应用"
+    } else if app.peer_is_focusing() {
+        "对方正在专注中"
+    } else {
+        "对方现在并没有在专注，催了也没意义"
+    };
+    if ui
+        .add_enabled(
+            app.peer_is_focusing(),
+            egui::Button::new(format!(
+                "{} {}",
+                NudgeKind::Nag.emoji(),
+                NudgeKind::Nag.label()
+            )),
+        )
+        .on_hover_text(nag_hint)
+        .on_disabled_hover_text(nag_hint)
+        .clicked()
+    {
+        request = Some(UiRequest::Nudge(NudgeKind::Nag));
+        ui.close();
+    }
+
+    if ui
+        .button(format!(
+            "{} {}",
+            NudgeKind::FocusTogether.emoji(),
+            NudgeKind::FocusTogether.label()
+        ))
+        .on_hover_text("对方空闲时会自动跟着开始一轮")
+        .clicked()
+    {
+        request = Some(UiRequest::Nudge(NudgeKind::FocusTogether));
+        ui.close();
+    }
+
+    ui.menu_button("其他互动", |ui| {
         for kind in NudgeKind::ALL {
+            // Already offered above.
+            if matches!(kind, NudgeKind::Nag | NudgeKind::FocusTogether) {
+                continue;
+            }
             if ui
                 .button(format!("{} {}", kind.emoji(), kind.label()))
                 .clicked()
@@ -365,6 +547,7 @@ pub fn settings(ctx: &egui::Context, app: &mut App, state: &mut UiState) -> bool
             ui.horizontal(|ui| {
                 for (tab, label) in [
                     (SettingsTab::Connection, "连接"),
+                    (SettingsTab::Accountability, "督促"),
                     (SettingsTab::Privacy, "隐私"),
                     (SettingsTab::Pomodoro, "番茄钟"),
                     (SettingsTab::Todos, "待办"),
@@ -377,9 +560,10 @@ pub fn settings(ctx: &egui::Context, app: &mut App, state: &mut UiState) -> bool
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .max_height(420.0)
+                .max_height(440.0)
                 .show(ui, |ui| match state.tab {
                     SettingsTab::Connection => connection_tab(ui, app),
+                    SettingsTab::Accountability => accountability_tab(ui, app),
                     SettingsTab::Privacy => privacy_tab(ui, app),
                     SettingsTab::Pomodoro => pomodoro_tab(ui, app),
                     SettingsTab::Todos => todos_tab(ui, app, state),
@@ -507,6 +691,145 @@ fn connection_tab(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
+/// The accountability tab: daily goal, distraction detection, and who gets told.
+///
+/// This is the tab that decides how much the tool actually pushes you, so each
+/// option says plainly what it does and who sees the result.
+fn accountability_tab(ui: &mut egui::Ui, app: &mut App) {
+    if app.draft.is_none() {
+        app.draft = Some(app.cfg.clone());
+    }
+
+    // Today's state, read from the real config rather than the draft: it describes
+    // what has happened, not what is being edited.
+    let goal_now = app.cfg.accountability.daily_goal_min;
+    if goal_now > 0 {
+        let (mine, theirs) = app.focus_comparison();
+        let streak = app.my_streak();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("今日：我 {mine} 分钟 / 对方 {theirs} 分钟")).strong(),
+            );
+            if streak > 1 {
+                ui.label(
+                    egui::RichText::new(format!("🔥 连续 {streak} 天"))
+                        .color(egui::Color32::from_rgb(0xff, 0x8f, 0x00)),
+                );
+            }
+        });
+        ui.add(
+            egui::ProgressBar::new(app.my_goal_progress()).text(format!("{mine}/{goal_now} 分钟")),
+        );
+        ui.separator();
+    }
+
+    let acc = &mut app.draft.as_mut().expect("just ensured").accountability;
+
+    ui.label(egui::RichText::new("每日目标").strong());
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Slider::new(&mut acc.daily_goal_min, 0..=600)
+                .suffix(" 分钟")
+                .step_by(5.0),
+        );
+    });
+    if acc.daily_goal_min == 0 {
+        ui.label(
+            egui::RichText::new("目标为 0：不统计目标与连续天数，只同步状态。")
+                .small()
+                .weak(),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new(format!(
+                "约 {} 个 {} 分钟的专注回合。达标后会自动告知对方。",
+                (acc.daily_goal_min as f32 / app.cfg.pomodoro.focus_min.max(1) as f32).ceil()
+                    as u32,
+                app.cfg.pomodoro.focus_min
+            ))
+            .small()
+            .weak(),
+        );
+    }
+
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("摸鱼检测").strong());
+    ui.label(
+        egui::RichText::new("只在专注回合进行中检查；休息和空闲时间不监控。")
+            .small()
+            .weak(),
+    );
+    ui.checkbox(&mut acc.warn_on_distraction, "专注时打开摸鱼应用就提醒我");
+
+    ui.add_enabled_ui(acc.warn_on_distraction, |ui| {
+        ui.indent("distraction", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("宽限时间");
+                ui.add(egui::Slider::new(&mut acc.distraction_grace_secs, 0..=300).suffix(" 秒"));
+            });
+            ui.label(
+                egui::RichText::new("切过去查资料不算摸鱼；只有停留超过这个时间才提醒。")
+                    .small()
+                    .weak(),
+            );
+
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut acc.report_distraction_to_peer,
+                "顺便告诉对方（默认关闭）",
+            );
+            ui.label(
+                egui::RichText::new(if acc.report_distraction_to_peer {
+                    "对方会收到你在专注时摸鱼的提醒。被盯着是自己选的。"
+                } else {
+                    "提醒只出现在本机，对方不会知道。"
+                })
+                .small()
+                .weak(),
+            );
+
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("摸鱼应用清单").strong());
+            ui.label(
+                egui::RichText::new("每行一个，匹配进程名或包名的一部分，不区分大小写。")
+                    .small()
+                    .weak(),
+            );
+
+            let mut list = acc.distracting_apps.join("\n");
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut list)
+                        .desired_rows(6)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("bilibili\nsteam\nyoutube"),
+                )
+                .changed()
+            {
+                acc.distracting_apps = list
+                    .lines()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+        });
+    });
+
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("互动").strong());
+    ui.checkbox(
+        &mut acc.allow_urgent_nudges,
+        "允许对方的「别摸鱼了」穿透免打扰",
+    );
+    ui.checkbox(&mut acc.auto_cheer, "对方达成目标时自动祝贺");
+    ui.label(
+        egui::RichText::new("鼓励要是靠人记得发，就不会发生，所以让它自动。")
+            .small()
+            .weak(),
+    );
+}
+
 fn privacy_tab(ui: &mut egui::Ui, app: &mut App) {
     if app.draft.is_none() {
         app.draft = Some(app.cfg.clone());
@@ -535,6 +858,13 @@ fn privacy_tab(ui: &mut egui::Ui, app: &mut App) {
     ui.checkbox(&mut privacy.share_battery, "同步电量");
     ui.checkbox(&mut privacy.share_music, "同步正在播放的音乐");
     ui.checkbox(&mut privacy.share_pomodoro, "同步番茄钟状态");
+    ui.indent("pomodoro-note", |ui| {
+        ui.label(
+            egui::RichText::new("同时包含今日专注分钟数、每日目标与连续天数——督促功能依赖这一项。")
+                .small()
+                .weak(),
+        );
+    });
     ui.checkbox(&mut privacy.share_todos, "同步待办清单");
     ui.checkbox(&mut privacy.share_idle, "同步空闲时长（用于自动离开）");
 

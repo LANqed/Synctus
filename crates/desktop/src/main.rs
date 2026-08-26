@@ -98,6 +98,9 @@ struct Desktop {
     overlay_visible: bool,
     /// Last label pushed to the tray, to avoid redundant updates.
     last_tray_label: String,
+    /// Last accountability values pushed to the tray. Updating a menu item on
+    /// every frame would flicker on Windows, so the tuple acts as a change guard.
+    last_tray_accountability: (u32, u32, u32, bool, bool),
 }
 
 impl Desktop {
@@ -109,6 +112,9 @@ impl Desktop {
             tray_failed: false,
             overlay_visible: !start_hidden,
             last_tray_label: String::new(),
+            // Deliberately not the real initial values, so the first sync always
+            // pushes something.
+            last_tray_accountability: (u32::MAX, u32::MAX, u32::MAX, false, false),
         }
     }
 
@@ -148,6 +154,19 @@ impl Desktop {
         if label != self.last_tray_label {
             tray.set_pomodoro_label(&label);
             self.last_tray_label = label;
+        }
+
+        // The tooltip and the nag entry are what the tray contributes to keeping
+        // each other honest, so they follow the numbers rather than the timer.
+        let (mine, theirs) = self.app.focus_comparison();
+        let goal = self.app.cfg.accountability.daily_goal_min;
+        let peer_focusing = self.app.peer_is_focusing();
+        let peer_slacking = self.app.peer_is_slacking();
+        let signature = (mine, theirs, goal, peer_focusing, peer_slacking);
+
+        if signature != self.last_tray_accountability {
+            tray.set_accountability(mine, theirs, goal, peer_focusing, peer_slacking);
+            self.last_tray_accountability = signature;
         }
     }
 

@@ -36,8 +36,14 @@ class ActionReceiver : BroadcastReceiver() {
             ACTION_TOGGLE_POMODORO ->
                 service.sendCommand(BridgeCommand.TogglePomodoro)
 
+            // Answering a nag by actually starting a round, straight from the shade.
+            ACTION_START_FOCUS ->
+                service.sendCommand(BridgeCommand.StartFocus)
+
             ACTION_NUDGE -> {
                 val kind = intent.getStringExtra(EXTRA_KIND) ?: NudgeKey.KNOCK
+                // The engine composes the nag text from the peer's own numbers, so
+                // no text is passed here.
                 service.sendCommand(BridgeCommand.Nudge(kind))
             }
         }
@@ -50,6 +56,7 @@ class ActionReceiver : BroadcastReceiver() {
         const val ACTION_KNOCK = "dev.synctus.app.KNOCK"
         const val ACTION_TOGGLE_REST = "dev.synctus.app.TOGGLE_REST"
         const val ACTION_TOGGLE_POMODORO = "dev.synctus.app.TOGGLE_POMODORO"
+        const val ACTION_START_FOCUS = "dev.synctus.app.START_FOCUS"
         const val ACTION_NUDGE = "dev.synctus.app.NUDGE"
 
         private const val EXTRA_KIND = "kind"

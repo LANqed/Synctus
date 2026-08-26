@@ -29,6 +29,7 @@ object Notifications {
     const val ID_STATUS = 1001
     private const val ID_NUDGE = 1002
     private const val ID_POMODORO = 1003
+    private const val ID_GOAL = 1004
 
     /** Create both channels. Idempotent, so it runs on every app start. */
     fun createChannels(context: Context) {
@@ -67,6 +68,9 @@ object Notifications {
      * This is both the UI and the keep-alive mechanism: Android will not kill a
      * process with a visible foreground service notification, which is exactly the
      * "通知栏保活" requirement.
+     *
+     * The body leads with the two focus numbers, because that comparison is what
+     * actually gets someone back to work.
      */
     fun buildStatus(
         context: Context,
@@ -81,16 +85,36 @@ object Notifications {
             else -> "${peer.name} · ${peer.presence}"
         }
 
-        val body = buildString {
-            if (peer != null) {
+        // The headline: today's minutes, mine against theirs.
+        val comparison = if (local.goalMin > 0) {
+            context.getString(
+                R.string.status_focus_comparison,
+                local.focusTodayMin,
+                local.peerFocusTodayMin,
+                local.goalMin,
+            )
+        } else {
+            context.getString(
+                R.string.status_focus_comparison_no_goal,
+                local.focusTodayMin,
+                local.peerFocusTodayMin,
+            )
+        }
+
+        val peerLine = if (peer != null) {
+            buildString {
                 append(peer.detail)
                 if (peer.meta.isNotEmpty()) {
                     append('\n')
                     append(peer.meta)
                 }
-            } else {
-                append(context.getString(R.string.status_no_peer_detail))
+                if (peer.slacking) {
+                    append('\n')
+                    append(context.getString(R.string.status_peer_slacking))
+                }
             }
+        } else {
+            context.getString(R.string.status_no_peer_detail)
         }
 
         // Our own line, so the user can see what the peer is being told.
@@ -106,15 +130,24 @@ object Notifications {
             } else if (local.completedToday > 0) {
                 append("  🍅×${local.completedToday}")
             }
+            if (local.streakDays > 1) {
+                append("  🔥${local.streakDays}")
+            }
+            if (local.distracted && local.distractedBy != null) {
+                append('\n')
+                append(context.getString(R.string.status_self_distracted, local.distractedBy))
+            }
         }
 
         val builder = NotificationCompat.Builder(context, CHANNEL_STATUS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
-            .setContentText(peer?.detail ?: body)
+            // The collapsed line is the comparison: it is the one thing worth
+            // seeing without expanding.
+            .setContentText(comparison)
             .setStyle(
                 NotificationCompat.BigTextStyle()
-                    .bigText("$body\n$selfLine")
+                    .bigText("$comparison\n$peerLine\n$selfLine")
             )
             .setContentIntent(openAppIntent(context))
             .setOngoing(true)
@@ -125,33 +158,47 @@ object Notifications {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
+        // A progress bar for the daily goal. Determinate and unobtrusive; it makes
+        // "how far along am I" answerable at a glance.
+        if (local.goalMin > 0) {
+            builder.setProgress(local.goalMin, local.focusTodayMin.coerceAtMost(local.goalMin), false)
+        }
+
         if (peer != null) {
             builder.color = peer.presenceColor.toInt()
             builder.setColorized(false)
         }
 
-        // Action 1: knock. The headline interaction, so it comes first.
-        builder.addAction(
-            NotificationCompat.Action(
-                R.drawable.ic_knock,
-                context.getString(R.string.action_knock),
-                ActionReceiver.pendingIntent(context, ActionReceiver.ACTION_KNOCK),
+        // Action 1: nag when they are slacking, knock otherwise. One button that
+        // always does the most useful thing beats two that need reading.
+        if (peer?.slacking == true) {
+            builder.addAction(
+                NotificationCompat.Action(
+                    R.drawable.ic_knock,
+                    context.getString(R.string.action_nag),
+                    ActionReceiver.nudgeIntent(context, NudgeKey.NAG),
+                )
             )
-        )
-
-        // Action 2: toggle rest, which is how presence is set from the shade.
-        val restingNow = local.presence == "休息中"
-        builder.addAction(
-            NotificationCompat.Action(
-                R.drawable.ic_rest,
-                context.getString(
-                    if (restingNow) R.string.action_back_to_work else R.string.action_rest
-                ),
-                ActionReceiver.pendingIntent(context, ActionReceiver.ACTION_TOGGLE_REST),
+        } else if (peer?.focusing == true) {
+            builder.addAction(
+                NotificationCompat.Action(
+                    R.drawable.ic_knock,
+                    context.getString(R.string.action_knock),
+                    ActionReceiver.pendingIntent(context, ActionReceiver.ACTION_KNOCK),
+                )
             )
-        )
+        } else {
+            // They are not focusing, so invite them instead of poking.
+            builder.addAction(
+                NotificationCompat.Action(
+                    R.drawable.ic_pomodoro,
+                    context.getString(R.string.action_focus_together),
+                    ActionReceiver.nudgeIntent(context, NudgeKey.FOCUS_TOGETHER),
+                )
+            )
+        }
 
-        // Action 3: the pomodoro.
+        // Action 2: the pomodoro, which is the thing the user acts on most.
         builder.addAction(
             NotificationCompat.Action(
                 R.drawable.ic_pomodoro,
@@ -163,6 +210,18 @@ object Notifications {
                     }
                 ),
                 ActionReceiver.pendingIntent(context, ActionReceiver.ACTION_TOGGLE_POMODORO),
+            )
+        )
+
+        // Action 3: toggle rest, which is how presence is set from the shade.
+        val restingNow = local.presence == "休息中"
+        builder.addAction(
+            NotificationCompat.Action(
+                R.drawable.ic_rest,
+                context.getString(
+                    if (restingNow) R.string.action_back_to_work else R.string.action_rest
+                ),
+                ActionReceiver.pendingIntent(context, ActionReceiver.ACTION_TOGGLE_REST),
             )
         )
 
@@ -182,27 +241,48 @@ object Notifications {
 
     /** Show an incoming poke. */
     fun showNudge(context: Context, event: BridgeEvent.Nudge) {
-        val notification = NotificationCompat.Builder(context, CHANNEL_NUDGE)
+        val builder = NotificationCompat.Builder(context, CHANNEL_NUDGE)
             .setSmallIcon(R.drawable.ic_knock)
             .setContentTitle(event.title)
             .setContentText(event.body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(event.body))
             .setContentIntent(openAppIntent(context))
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
-            // Let the user poke back without opening the app.
-            .addAction(
+
+        // An urgent nudge is the one thing allowed to interrupt: a nag that waits
+        // for the user to glance at their phone does nothing.
+        if (event.urgent) {
+            builder
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                // Heads-up display even when a full-screen app is in front.
+                .setFullScreenIntent(openAppIntent(context), false)
+        }
+
+        // A distraction warning is about the user's own behaviour, so poking back
+        // makes no sense; the peer's pokes get a reply button.
+        if (event.kind != "distraction") {
+            builder.addAction(
                 NotificationCompat.Action(
                     R.drawable.ic_knock,
                     context.getString(R.string.action_knock_back),
                     ActionReceiver.pendingIntent(context, ActionReceiver.ACTION_KNOCK),
                 )
             )
-            .build()
+            // Answering a nag by actually starting a round is the useful reply.
+            builder.addAction(
+                NotificationCompat.Action(
+                    R.drawable.ic_pomodoro,
+                    context.getString(R.string.action_start_focus),
+                    ActionReceiver.pendingIntent(context, ActionReceiver.ACTION_START_FOCUS),
+                )
+            )
+        }
 
         try {
-            NotificationManagerCompat.from(context).notify(ID_NUDGE, notification)
+            NotificationManagerCompat.from(context).notify(ID_NUDGE, builder.build())
         } catch (e: SecurityException) {
             // Notifications not granted; the in-app UI still shows it.
         }
@@ -225,6 +305,37 @@ object Notifications {
 
         try {
             NotificationManagerCompat.from(context).notify(ID_POMODORO, notification)
+        } catch (e: SecurityException) {
+            // As above.
+        }
+    }
+
+    /**
+     * Celebrate meeting the daily goal.
+     *
+     * Separate from [showPomodoro] so it does not get lost among round-finished
+     * messages: hitting the target is the moment worth noticing.
+     */
+    fun showGoalReached(context: Context, goalMin: Int, streakDays: Int) {
+        val body = if (streakDays > 1) {
+            context.getString(R.string.goal_body_streak, goalMin, streakDays)
+        } else {
+            context.getString(R.string.goal_body, goalMin)
+        }
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_NUDGE)
+            .setSmallIcon(R.drawable.ic_pomodoro)
+            .setContentTitle(context.getString(R.string.goal_title))
+            .setContentText(body)
+            .setContentIntent(openAppIntent(context))
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .build()
+
+        try {
+            NotificationManagerCompat.from(context).notify(ID_GOAL, notification)
         } catch (e: SecurityException) {
             // As above.
         }

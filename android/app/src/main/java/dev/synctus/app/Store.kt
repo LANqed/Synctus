@@ -60,6 +60,103 @@ class Store(context: Context) {
         get() = prefs.getBoolean(KEY_AUTOSTART, true)
         set(value) = prefs.edit().putBoolean(KEY_AUTOSTART, value).apply()
 
+    // --- daily focus accounting -------------------------------------------
+
+    /**
+     * Today's focus progress, rolled over at midnight.
+     *
+     * The engine holds these in memory only; Android owns the persistence because
+     * its process can be killed and restarted at any time. Reading rolls the day
+     * first, so a session that spans midnight starts fresh.
+     */
+    fun loadProgress(): Progress {
+        val today = todayKey()
+        val storedDate = prefs.getString(KEY_PROGRESS_DATE, null)
+
+        if (storedDate != today) {
+            // New day: minutes reset. The streak is kept — whether it survived
+            // depends on when the goal was last met, which [registerGoalMet]
+            // decides.
+            return Progress(
+                focusTodayMin = 0,
+                streakDays = effectiveStreak(),
+            )
+        }
+
+        return Progress(
+            focusTodayMin = prefs.getInt(KEY_FOCUS_MIN, 0),
+            streakDays = effectiveStreak(),
+        )
+    }
+
+    /** Persist the engine's current totals. */
+    fun saveProgress(focusTodayMin: Int, streakDays: Int) {
+        prefs.edit()
+            .putString(KEY_PROGRESS_DATE, todayKey())
+            .putInt(KEY_FOCUS_MIN, focusTodayMin)
+            .putInt(KEY_STREAK, streakDays)
+            .apply()
+    }
+
+    /**
+     * Record that today's goal was met, returning the new streak.
+     *
+     * Idempotent within a day: calling it twice does not inflate the streak, which
+     * matters because the engine reports the crossing and the service may replay
+     * events after a restart.
+     */
+    fun registerGoalMet(): Int {
+        val today = todayKey()
+        if (prefs.getString(KEY_GOAL_DATE, null) == today) {
+            return prefs.getInt(KEY_STREAK, 0)
+        }
+
+        // A streak continues only if the previous success was yesterday.
+        val previous = prefs.getString(KEY_GOAL_DATE, null)
+        val streak = if (previous == yesterdayKey()) {
+            prefs.getInt(KEY_STREAK, 0) + 1
+        } else {
+            1
+        }
+
+        prefs.edit()
+            .putString(KEY_GOAL_DATE, today)
+            .putInt(KEY_STREAK, streak)
+            .apply()
+        return streak
+    }
+
+    /**
+     * The streak as it stands now.
+     *
+     * A stored streak goes stale: if the last success was three days ago the streak
+     * is over, even though the number is still in the file. Today counts as intact
+     * so an unfinished day does not read as a break.
+     */
+    private fun effectiveStreak(): Int {
+        val last = prefs.getString(KEY_GOAL_DATE, null) ?: return 0
+        return if (last == todayKey() || last == yesterdayKey()) {
+            prefs.getInt(KEY_STREAK, 0)
+        } else {
+            0
+        }
+    }
+
+    /** Today's focus totals. */
+    data class Progress(val focusTodayMin: Int, val streakDays: Int)
+
+    /**
+     * Day key as days-since-epoch in UTC.
+     *
+     * Matches the Rust side's boundary exactly; using the device's local calendar
+     * here would make the two disagree about when "today" ends.
+     */
+    private fun todayKey(): String =
+        (System.currentTimeMillis() / 86_400_000L).toString()
+
+    private fun yesterdayKey(): String =
+        ((System.currentTimeMillis() - 86_400_000L) / 86_400_000L).toString()
+
     /**
      * A fresh config with a stable device id.
      *
@@ -90,5 +187,9 @@ class Store(context: Context) {
         const val KEY_TODOS = "todos"
         const val KEY_AUTOSTART = "autostart"
         const val KEY_DEVICE_ID = "device_id"
+        const val KEY_PROGRESS_DATE = "progress_date"
+        const val KEY_FOCUS_MIN = "focus_today_min"
+        const val KEY_STREAK = "streak_days"
+        const val KEY_GOAL_DATE = "last_goal_date"
     }
 }

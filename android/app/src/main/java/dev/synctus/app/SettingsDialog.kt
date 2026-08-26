@@ -132,6 +132,125 @@ fun SettingsDialog(
                 )
 
                 HorizontalDivider()
+                Text("督促", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "这一栏决定了这个工具有多“烦人”。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                SliderRow(
+                    label = "每日目标",
+                    value = draft.accountability.dailyGoalMin.toFloat(),
+                    range = 0f..600f,
+                    suffix = " 分钟",
+                ) {
+                    draft = draft.copy(
+                        accountability = draft.accountability.copy(dailyGoalMin = it.toInt())
+                    )
+                }
+                Text(
+                    if (draft.accountability.dailyGoalMin == 0) {
+                        "目标为 0：不统计目标与连续天数，只同步状态。"
+                    } else {
+                        "约 ${
+                            Math.ceil(
+                                draft.accountability.dailyGoalMin.toDouble() /
+                                    draft.pomodoro.focusMin.coerceAtLeast(1)
+                            ).toInt()
+                        } 个 ${draft.pomodoro.focusMin} 分钟的专注回合。达标后会自动告知对方。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                SwitchRow(
+                    label = "专注时打开摸鱼应用就提醒我",
+                    checked = draft.accountability.warnOnDistraction,
+                ) {
+                    draft = draft.copy(
+                        accountability = draft.accountability.copy(warnOnDistraction = it)
+                    )
+                }
+                Text(
+                    "只在专注回合进行中检查；休息和空闲时间不监控。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                if (draft.accountability.warnOnDistraction) {
+                    SliderRow(
+                        label = "宽限时间",
+                        value = draft.accountability.distractionGraceSecs.toFloat(),
+                        range = 0f..300f,
+                        suffix = " 秒",
+                    ) {
+                        draft = draft.copy(
+                            accountability =
+                                draft.accountability.copy(distractionGraceSecs = it.toInt())
+                        )
+                    }
+                    Text(
+                        "切过去查资料不算摸鱼；只有停留超过这个时间才提醒。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    SwitchRow(
+                        label = "顺便告诉对方",
+                        checked = draft.accountability.reportDistractionToPeer,
+                    ) {
+                        draft = draft.copy(
+                            accountability =
+                                draft.accountability.copy(reportDistractionToPeer = it)
+                        )
+                    }
+                    Text(
+                        if (draft.accountability.reportDistractionToPeer) {
+                            "对方会收到你在专注时摸鱼的提醒。被盯着是自己选的。"
+                        } else {
+                            "提醒只出现在本机，对方不会知道。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    OutlinedTextField(
+                        value = draft.accountability.distractingApps.joinToString("\n"),
+                        onValueChange = { text ->
+                            draft = draft.copy(
+                                accountability = draft.accountability.copy(
+                                    distractingApps = text.lines()
+                                        .map { it.trim() }
+                                        .filter { it.isNotEmpty() },
+                                )
+                            )
+                        },
+                        label = { Text("摸鱼应用清单（每行一个，匹配包名的一部分）") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                SwitchRow(
+                    label = "允许对方的「别摸鱼了」穿透免打扰",
+                    checked = draft.accountability.allowUrgentNudges,
+                ) {
+                    draft = draft.copy(
+                        accountability = draft.accountability.copy(allowUrgentNudges = it)
+                    )
+                }
+                SwitchRow(
+                    label = "对方达成目标时自动祝贺",
+                    checked = draft.accountability.autoCheer,
+                ) {
+                    draft = draft.copy(
+                        accountability = draft.accountability.copy(autoCheer = it)
+                    )
+                }
+
+                HorizontalDivider()
                 Text("隐私", style = MaterialTheme.typography.titleSmall)
                 Text(
                     "关闭的项目根本不会离开本机。",
@@ -162,6 +281,11 @@ fun SettingsDialog(
                 ) {
                     draft = draft.copy(privacy = draft.privacy.copy(sharePomodoro = it))
                 }
+                Text(
+                    "同时包含今日专注分钟数、每日目标与连续天数——督促功能依赖这一项。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 SwitchRow(
                     label = "同步待办清单",
                     checked = draft.privacy.shareTodos,

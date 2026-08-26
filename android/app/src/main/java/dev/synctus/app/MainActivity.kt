@@ -26,12 +26,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -190,7 +192,8 @@ private fun MainScreen(
             }
 
             PeerCard(state)
-            NudgeRow()
+            FocusCard(state)
+            NudgeRow(state)
             PomodoroCard(state.local)
             PermissionHints(
                 onOpenUsageAccess = onOpenUsageAccess,
@@ -333,12 +336,165 @@ private fun PeerCard(state: SyncService.ServiceState) {
                 Spacer(Modifier.height(8.dp))
                 Text(nudge.body, style = MaterialTheme.typography.bodyMedium)
             }
+
+            // Caught them: the nag button appears where the evidence is, rather
+            // than being buried among the other interactions.
+            if (peer.slacking) {
+                Spacer(Modifier.height(8.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "👀 TA 在专注中，却开着摸鱼应用",
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Button(
+                        onClick = {
+                            SyncService.instance?.let { service ->
+                                service.sendCommand(BridgeCommand.Nudge(NudgeKey.NAG))
+                                service.refreshNow()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        ),
+                    ) {
+                        Text("抓到了")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Today's focus minutes for both people.
+ *
+ * The single most useful thing on the screen: seeing "我 50 / TA 75" is what gets
+ * someone to start a round, far more than any notification does.
+ */
+@Composable
+private fun FocusCard(state: SyncService.ServiceState) {
+    val local = state.local
+    val peer = state.peer
+
+    // Goals disabled on both sides: the card would be two empty bars.
+    if (local.goalMin <= 0 && (peer?.goalMin ?: 0) <= 0) {
+        return
+    }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("今日专注", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                if (local.streakDays > 1) {
+                    Text(
+                        "🔥 连续 ${local.streakDays} 天",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFFFF8F00),
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+
+            // Mine.
+            FocusBar(
+                who = "我",
+                minutes = local.focusTodayMin,
+                goal = local.goalMin,
+                progress = local.goalProgress(),
+                done = local.goalMet,
+                accent = Color(0xFF42A5F5),
+            )
+
+            if (peer != null) {
+                Spacer(Modifier.height(8.dp))
+                FocusBar(
+                    who = peer.name,
+                    minutes = peer.focusTodayMin,
+                    goal = peer.goalMin,
+                    progress = peer.goalProgress(),
+                    done = peer.goalMet(),
+                    accent = Color(0xFF9E9E9E),
+                    streak = peer.streakDays,
+                )
+            }
+
+            // The line that actually motivates: how much is left, or who is ahead.
+            if (local.goalMin > 0) {
+                Spacer(Modifier.height(8.dp))
+                val message = when {
+                    local.goalMet -> "今天的目标已完成"
+                    peer != null && peer.focusTodayMin > local.focusTodayMin ->
+                        "还差 ${local.remainingMin()} 分钟，对方已经比你多 " +
+                            "${peer.focusTodayMin - local.focusTodayMin} 分钟了"
+                    else -> "还差 ${local.remainingMin()} 分钟"
+                }
+                Text(
+                    message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (local.goalMet) {
+                        Color(0xFF4CAF50)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun NudgeRow() {
+private fun FocusBar(
+    who: String,
+    minutes: Int,
+    goal: Int,
+    progress: Float,
+    done: Boolean,
+    accent: Color,
+    streak: Int = 0,
+) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                who,
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (streak > 1) {
+                Text(
+                    "🔥$streak",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(
+                if (goal > 0) "$minutes/$goal 分钟" else "$minutes 分钟",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (done) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp),
+            color = if (done) Color(0xFF4CAF50) else accent,
+        )
+    }
+}
+
+@Composable
+private fun NudgeRow(state: SyncService.ServiceState) {
+    // Nagging someone who is not pretending to work is just being annoying, so the
+    // chip is disabled unless they are in a focus round.
+    val peerFocusing = state.peer?.focusing == true
+
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
             Text("互动", style = MaterialTheme.typography.titleSmall)
@@ -352,6 +508,7 @@ private fun NudgeRow() {
                     val emoji = entry.second
                     val label = entry.third
                     AssistChip(
+                        enabled = kind != NudgeKey.NAG || peerFocusing,
                         onClick = {
                             SyncService.instance?.let { service ->
                                 service.sendCommand(BridgeCommand.Nudge(kind))

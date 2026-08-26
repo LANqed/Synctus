@@ -12,6 +12,10 @@
     <string name="status_waiting_peer">等待对方上线…</string>
     <string name="status_no_peer_detail">尚未收到对方状态</string>
     <string name="status_self_prefix">我：</string>
+    <string name="status_focus_comparison">今日专注　我 %1$d / TA %2$d 分钟　目标 %3$d</string>
+    <string name="status_focus_comparison_no_goal">今日专注　我 %1$d / TA %2$d 分钟</string>
+    <string name="status_peer_slacking">👀 对方在专注中，却开着摸鱼应用</string>
+    <string name="status_self_distracted">👀 你在专注中开着 %1$s</string>
 
     <!-- Connection states -->
     <string name="conn_online">已连接</string>
@@ -22,6 +26,8 @@
     <!-- Notification actions -->
     <string name="action_knock">敲一敲</string>
     <string name="action_knock_back">敲回去</string>
+    <string name="action_nag">别摸鱼了</string>
+    <string name="action_focus_together">一起专注</string>
     <string name="action_rest">去休息</string>
     <string name="action_back_to_work">回来了</string>
     <string name="action_start_focus">开始专注</string>
@@ -29,6 +35,9 @@
     <string name="action_resume">继续</string>
 
     <string name="pomodoro_title">番茄钟</string>
+    <string name="goal_title">🎉 达成目标</string>
+    <string name="goal_body">今天的 %1$d 分钟完成了</string>
+    <string name="goal_body_streak">今天的 %1$d 分钟完成了，已连续 %2$d 天</string>
 
     <!-- Warnings -->
     <string name="warn_not_paired">尚未填写配对码，请打开应用完成配对</string>

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use synctus_core::client::{Client, ClientHandle, Command, ConnState, Event};
 use synctus_core::config::ClientConfig;
+use synctus_core::focus::{Distraction, DistractionTracker};
 use synctus_core::model::{Nudge, NudgeKind, PomodoroPhase, Presence, StatusSnapshot, Todo};
 use synctus_core::store::{LocalData, PeerView, Pomodoro, PomodoroEvent};
 
@@ -51,6 +52,11 @@ pub struct App {
     pub pomodoro: Pomodoro,
     pub peers: PeerView,
 
+    /// Watches the foreground app during focus rounds.
+    distraction: DistractionTracker,
+    /// Set while a distraction is being reported, for the overlay banner.
+    pub distracted_by: Option<String>,
+
     /// `None` until a pairing code is configured.
     client: Option<ClientHandle>,
     events: Option<tokio::sync::mpsc::Receiver<Event>>,
@@ -82,6 +88,12 @@ pub struct App {
     pub update: Option<synctus_core::update::UpdateInfo>,
     update_rx: Option<mpsc::Receiver<Option<synctus_core::update::UpdateInfo>>>,
 
+    /// Peer device ids already congratulated for today's goal, so [`auto_cheer`]
+    /// fires once rather than on every snapshot.
+    cheered_today: Vec<String>,
+    /// Date the cheer list belongs to.
+    cheered_date: String,
+
     pub show_settings: bool,
     /// Text being edited in the settings pane, applied on save.
     pub draft: Option<ClientConfig>,
@@ -110,6 +122,8 @@ impl App {
             data,
             pomodoro,
             peers: PeerView::default(),
+            distraction: DistractionTracker::new(),
+            distracted_by: None,
             client: None,
             events: None,
             runtime,
@@ -125,6 +139,8 @@ impl App {
             last_nudge: None,
             update: None,
             update_rx: None,
+            cheered_today: Vec::new(),
+            cheered_date: String::new(),
             show_settings: false,
             draft: None,
         };
@@ -191,6 +207,7 @@ impl App {
         self.drain_events();
         self.drain_update();
         self.advance_pomodoro();
+        self.check_distraction();
         self.request_sample_if_due();
         self.publish_if_changed();
     }
@@ -238,7 +255,27 @@ impl App {
                     self.conn = state;
                 }
                 Event::PeerStatus(snap) => {
+                    let goal_just_met =
+                        snap.goal_met() && !self.already_cheered(&snap.device_id, snap.at);
+                    let device_id = snap.device_id.clone();
+                    let name = snap.name.clone();
+                    let minutes = snap.focus_today_min;
+
                     self.peers.apply_status(snap);
+
+                    // Congratulate once when they reach their goal. Encouragement
+                    // that depends on someone remembering to send it does not
+                    // happen, so it is automatic.
+                    if goal_just_met && self.cfg.accountability.auto_cheer {
+                        self.mark_cheered(&device_id);
+                        self.note(format!("{name} 完成了今天的目标（{minutes} 分钟）"));
+                        if let Some(client) = self.client.as_ref() {
+                            let mut nudge =
+                                Nudge::new(NudgeKind::Cheer, self.cfg.device_name.clone());
+                            nudge.text = Some(format!("今天 {minutes} 分钟，达标了！"));
+                            let _ = client.nudge(nudge);
+                        }
+                    }
                 }
                 Event::PeerTodos { device_id, items } => {
                     self.peers.apply_todos(device_id, items);
@@ -284,19 +321,94 @@ impl App {
     }
 
     fn advance_pomodoro(&mut self) {
+        let event = self.pomodoro.tick(synctus_core::now_ms());
+        self.handle_pomodoro_event(event);
+    }
+
+    /// React to a pomodoro boundary.
+    ///
+    /// Shared by the timer tick and by an explicit skip: a skipped round still
+    /// finished, so it must still credit its minutes. Routing both through here is
+    /// what keeps the two paths from drifting.
+    fn handle_pomodoro_event(&mut self, event: PomodoroEvent) {
         let now = synctus_core::now_ms();
-        match self.pomodoro.tick(now) {
+        match event {
             PomodoroEvent::Nothing => {}
-            PomodoroEvent::FocusFinished(next) => {
-                self.data.completed_today = self.pomodoro.state().completed_today;
+            PomodoroEvent::FocusFinished { next, minutes } => {
                 self.data.round = self.pomodoro.state().round;
+
+                // Credit the minutes and see whether that met today's goal.
+                let goal = self.cfg.accountability.daily_goal_min;
+                let met_now = self.data.register_focus(minutes, goal, now);
+                // The pomodoro keeps its own round counter; keep the two in step
+                // so a restart resumes at the right place in the set.
+                self.data.completed_today = self.pomodoro.state().completed_today;
                 self.save_data();
-                crate::notify::focus_finished(next);
-                self.note("专注回合完成");
+
+                crate::notify::focus_finished(next, minutes);
+                self.note(format!(
+                    "专注 {minutes} 分钟完成，今日累计 {} 分钟",
+                    self.data.focus_today_min
+                ));
+
+                if met_now {
+                    let streak = self.data.effective_streak(now);
+                    crate::notify::goal_reached(goal, streak);
+                    self.note(format!("达成今日目标，连续 {streak} 天"));
+                }
+                self.last_published = None;
             }
             PomodoroEvent::BreakFinished => {
                 crate::notify::break_finished();
                 self.note("休息结束");
+                self.last_published = None;
+            }
+        }
+    }
+
+    /// Watch the foreground app during a focus round.
+    ///
+    /// The warning is aimed at *me* first: catching yourself is the point, and
+    /// telling the peer is opt-in.
+    fn check_distraction(&mut self) {
+        let now = synctus_core::now_ms();
+        let focusing =
+            self.pomodoro.state().phase == PomodoroPhase::Focus && !self.pomodoro.state().paused();
+
+        let verdict = self.distraction.update(
+            self.sample.foreground.as_ref(),
+            focusing,
+            &self.cfg.accountability,
+            now,
+        );
+
+        match verdict {
+            Distraction::None | Distraction::Pending { .. } => {
+                self.distracted_by = None;
+            }
+            Distraction::Started { app } => {
+                let remaining = self.pomodoro.state().remaining_text(now);
+                crate::notify::distraction(&app, &remaining);
+                self.note(format!("专注中打开了 {app}，还剩 {remaining}"));
+                self.distracted_by = Some(app);
+
+                // Telling the peer is a separate decision from warning myself.
+                if self.cfg.accountability.report_distraction_to_peer {
+                    if let Some(client) = self.client.as_ref() {
+                        let mut nudge = Nudge::new(NudgeKind::Nag, self.cfg.device_name.clone());
+                        nudge.text = Some(format!(
+                            "我在专注时打开了 {}，盯着我",
+                            self.distracted_by.as_deref().unwrap_or("别的东西")
+                        ));
+                        let _ = client.nudge(nudge);
+                    }
+                }
+                self.last_published = None;
+            }
+            Distraction::Ended { app, secs } => {
+                self.note(format!("离开 {app}，共 {secs} 秒"));
+                self.distracted_by = None;
+                self.last_published = None;
             }
         }
     }
@@ -359,6 +471,15 @@ impl App {
         if privacy.share_idle {
             snap.idle_secs = self.sample.idle_secs;
         }
+
+        // The accountability numbers ride along with the pomodoro permission:
+        // they are the same kind of information about the same activity.
+        if privacy.share_pomodoro {
+            snap.focus_today_min = self.data.focus_today_min;
+            snap.goal_min = self.cfg.accountability.daily_goal_min;
+            snap.streak_days = self.data.effective_streak(snap.at);
+        }
+
         snap
     }
 
@@ -430,7 +551,10 @@ impl App {
                 false
             }
             UiRequest::SkipPhase => {
-                self.pomodoro.skip(synctus_core::now_ms());
+                // Skipping still finishes the round, so it goes through the same
+                // handler as the deadline and credits its minutes.
+                let event = self.pomodoro.skip(synctus_core::now_ms());
+                self.handle_pomodoro_event(event);
                 self.last_published = None;
                 false
             }
@@ -461,11 +585,67 @@ impl App {
             self.note("未连接，无法发送互动");
             return;
         };
-        let nudge = Nudge::new(kind, self.cfg.device_name.clone());
+
+        let mut nudge = Nudge::new(kind, self.cfg.device_name.clone());
+
+        // A nag carries the evidence: naming what they are doing and how far
+        // behind they are is what makes it land, rather than a bare "get back to
+        // work".
+        if kind == NudgeKind::Nag {
+            nudge.text = self.nag_text();
+        }
+
         match client.nudge(nudge) {
             Ok(()) => self.note(format!("已发送 {}", kind.label())),
             Err(e) => self.note(format!("发送失败: {e:#}")),
         }
+    }
+
+    /// Build the body of a nag from what the peer last reported.
+    ///
+    /// `None` when there is nothing specific to say, which leaves the default
+    /// wording in place.
+    fn nag_text(&self) -> Option<String> {
+        let now = synctus_core::now_ms();
+        let peer = self.peers.primary(now, self.cfg.peer_stale_ms())?;
+
+        // Quote their own app back at them when they are supposed to be focusing.
+        if peer.is_focusing() {
+            if let Some(app) = peer.foreground_app() {
+                if self.cfg.accountability.is_distracting(app) {
+                    return Some(format!("你在专注中开着 {app}，专心点"));
+                }
+            }
+        }
+
+        if peer.goal_min > 0 && !peer.goal_met() {
+            let left = peer.goal_min.saturating_sub(peer.focus_today_min);
+            let (mine, _) = self.peers.focus_comparison(
+                self.data.focus_today_min,
+                now,
+                self.cfg.peer_stale_ms(),
+            );
+            return Some(format!("今天还差 {left} 分钟，我已经做了 {mine} 分钟了"));
+        }
+
+        None
+    }
+
+    // --- cheering ---------------------------------------------------------
+
+    /// Whether this peer device was already congratulated today.
+    fn already_cheered(&self, device_id: &str, now: i64) -> bool {
+        // The list is per-day; a stale date means nobody has been cheered yet.
+        self.cheered_date == today_key(now) && self.cheered_today.iter().any(|d| d == device_id)
+    }
+
+    fn mark_cheered(&mut self, device_id: &str) {
+        let today = today_key(synctus_core::now_ms());
+        if self.cheered_date != today {
+            self.cheered_date = today;
+            self.cheered_today.clear();
+        }
+        self.cheered_today.push(device_id.to_string());
     }
 
     // --- to-dos -----------------------------------------------------------
@@ -633,6 +813,50 @@ impl App {
         matches!(self.conn, ConnState::Online)
     }
 
+    // --- accountability views for the UI ----------------------------------
+
+    /// Today's focus minutes: `(mine, theirs)`.
+    pub fn focus_comparison(&self) -> (u32, u32) {
+        self.peers.focus_comparison(
+            self.data.focus_today_min,
+            synctus_core::now_ms(),
+            self.cfg.peer_stale_ms(),
+        )
+    }
+
+    /// Progress towards my daily goal, 0.0 to 1.0.
+    pub fn my_goal_progress(&self) -> f32 {
+        let goal = self.cfg.accountability.daily_goal_min;
+        if goal == 0 {
+            return 0.0;
+        }
+        (self.data.focus_today_min as f32 / goal as f32).clamp(0.0, 1.0)
+    }
+
+    pub fn my_streak(&self) -> u32 {
+        self.data.effective_streak(synctus_core::now_ms())
+    }
+
+    /// Whether the peer is in a focus round right now, which is when nagging is
+    /// justified.
+    pub fn peer_is_focusing(&self) -> bool {
+        self.peers
+            .is_focusing(synctus_core::now_ms(), self.cfg.peer_stale_ms())
+    }
+
+    /// Whether the peer appears to be slacking: focusing on paper, but with a
+    /// distracting app in the foreground.
+    pub fn peer_is_slacking(&self) -> bool {
+        let Some(peer) = self.peer() else {
+            return false;
+        };
+        peer.is_focusing()
+            && peer
+                .foreground_app()
+                .map(|app| self.cfg.accountability.is_distracting(app))
+                .unwrap_or(false)
+    }
+
     /// Called on exit so nothing is lost and the peer sees us go offline.
     pub fn shutdown(&mut self) {
         self.save_data();
@@ -653,6 +877,9 @@ fn snapshot_eq(a: &StatusSnapshot, b: &StatusSnapshot) -> bool {
         && a.pomodoro == b.pomodoro
         && a.todos_open == b.todos_open
         && a.todos_done_today == b.todos_done_today
+        && a.focus_today_min == b.focus_today_min
+        && a.goal_min == b.goal_min
+        && a.streak_days == b.streak_days
         // Idle seconds change constantly; only a coarse bucket is worth resending.
         && idle_bucket(a.idle_secs) == idle_bucket(b.idle_secs)
 }
@@ -660,6 +887,15 @@ fn snapshot_eq(a: &StatusSnapshot, b: &StatusSnapshot) -> bool {
 /// Bucket idle seconds so a ticking counter does not cause a publish per poll.
 fn idle_bucket(idle: Option<u32>) -> Option<u32> {
     idle.map(|s| s / 60)
+}
+
+/// `YYYY-MM-DD` in UTC, for the once-per-day cheer bookkeeping.
+///
+/// Only needs to be a stable day key, so it reuses the same arithmetic as the
+/// store rather than pulling in a date library.
+fn today_key(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    format!("{days}")
 }
 
 /// Sensor sampling thread.
@@ -753,5 +989,30 @@ mod tests {
         assert_eq!(idle_bucket(Some(59)), Some(0));
         assert_eq!(idle_bucket(Some(61)), Some(1));
         assert_eq!(idle_bucket(None), None);
+    }
+
+    #[test]
+    fn accountability_numbers_are_part_of_a_change() {
+        // Focus minutes are the number the peer watches, so a change in them must
+        // reach them promptly rather than waiting for the 30-second heartbeat.
+        let a = snap();
+        let mut b = a.clone();
+        b.focus_today_min = 25;
+        assert!(!snapshot_eq(&a, &b));
+
+        let mut c = a.clone();
+        c.streak_days = 3;
+        assert!(!snapshot_eq(&a, &c));
+
+        let mut d = a.clone();
+        d.goal_min = 100;
+        assert!(!snapshot_eq(&a, &d));
+    }
+
+    #[test]
+    fn day_key_changes_at_midnight_utc() {
+        let day = 86_400_000;
+        assert_eq!(today_key(0), today_key(day - 1));
+        assert_ne!(today_key(day - 1), today_key(day));
     }
 }

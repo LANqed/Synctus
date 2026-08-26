@@ -24,6 +24,7 @@ use std::sync::Mutex;
 
 use synctus_core::client::{Client, ClientHandle, Command, ConnState, Event};
 use synctus_core::config::{ClientConfig, PomodoroConfig};
+use synctus_core::focus::{Distraction, DistractionTracker};
 use synctus_core::model::{
     Battery, ForegroundApp, NowPlaying, Nudge, NudgeKind, PomodoroPhase, Presence, StatusSnapshot,
     Todo,
@@ -50,6 +51,10 @@ pub enum BridgeCommand {
     /// Send an interaction.
     Nudge {
         kind: NudgeKind,
+        /// Optional text. The desktop composes a nag from the peer's own state;
+        /// Android lets the UI pass one in.
+        #[serde(default)]
+        text: Option<String>,
     },
     /// Set the presence the user picked in the notification or the UI.
     SetPresence {
@@ -63,6 +68,14 @@ pub enum BridgeCommand {
     /// Replace the to-do list and publish it.
     SetTodos {
         items: Vec<Todo>,
+    },
+    /// Restore today's focus accounting after the service restarts.
+    ///
+    /// Android owns the persistence, so the engine has to be told where it left
+    /// off rather than reading a file itself.
+    RestoreProgress {
+        focus_today_min: u32,
+        streak_days: u32,
     },
     /// Apply an edited configuration and reconnect.
     Reconfigure {
@@ -88,12 +101,23 @@ pub enum BridgeEvent {
         /// Secondary line: battery, pomodoro, to-dos.
         meta: String,
         stale: bool,
+        /// Today's focus minutes, and the goal they are working towards.
+        focus_today_min: u32,
+        goal_min: u32,
+        streak_days: u32,
+        /// In a focus round right now. Gates the nag button.
+        focusing: bool,
+        /// Focusing on paper, but with a distracting app open. Turns the nag
+        /// button into something with evidence behind it.
+        slacking: bool,
     },
     /// A poke arrived; the service raises a high-priority notification.
     Nudge {
         title: String,
         body: String,
         kind: String,
+        /// Whether it should break through do-not-disturb.
+        urgent: bool,
     },
     /// Local pomodoro reached a boundary.
     Pomodoro {
@@ -102,6 +126,9 @@ pub enum BridgeEvent {
         finished: bool,
         message: String,
     },
+    /// The daily goal was reached. Separate from `Pomodoro` because it deserves
+    /// its own celebration rather than being buried in a round-finished message.
+    GoalReached { goal_min: u32, streak_days: u32 },
     /// The peer's to-do list.
     PeerTodos { items: Vec<Todo> },
     /// Something worth logging but not fatal.
@@ -125,6 +152,17 @@ pub struct Bridge {
     pomodoro: Pomodoro,
     peers: synctus_core::store::PeerView,
     conn: ConnState,
+
+    /// Today's focus accounting. Android persists it through
+    /// [`Bridge::restore_progress`] rather than owning a file here, because the
+    /// app already has SharedPreferences and the JNI layer should stay stateless.
+    focus_today_min: u32,
+    streak_days: u32,
+
+    /// Watches the foreground app during focus rounds. Android samples the
+    /// foreground app on its own timer and hands it to `Publish`, so the tracker
+    /// only ever sees real samples.
+    distraction: DistractionTracker,
 
     /// Sensor values from the last `Publish`, kept so a pomodoro or presence
     /// change can republish without waiting for Android to sample again.
@@ -170,6 +208,9 @@ impl Bridge {
             runtime,
             peers: synctus_core::store::PeerView::default(),
             conn: ConnState::Connecting,
+            focus_today_min: 0,
+            streak_days: 0,
+            distraction: DistractionTracker::new(),
             last_sensors: Sensors::default(),
             manual_presence: None,
             todos: Vec::new(),
@@ -200,10 +241,16 @@ impl Bridge {
                 if let Some(p) = presence {
                     self.manual_presence = (p != Presence::Active).then_some(p);
                 }
+                // Each sample is also a chance to notice slacking off.
+                self.check_distraction();
                 self.publish()
             }
-            BridgeCommand::Nudge { kind } => {
-                let nudge = Nudge::new(kind, self.cfg.device_name.clone());
+            BridgeCommand::Nudge { kind, text } => {
+                let mut nudge = Nudge::new(kind, self.cfg.device_name.clone());
+                // A nag with the peer's own numbers in it lands; a bare one does
+                // not. The caller may override with their own wording.
+                nudge.text =
+                    text.or_else(|| (kind == NudgeKind::Nag).then(|| self.nag_text()).flatten());
                 self.client.nudge(nudge)
             }
             BridgeCommand::SetPresence { presence } => {
@@ -228,7 +275,10 @@ impl Bridge {
                 self.publish()
             }
             BridgeCommand::SkipPhase => {
-                self.pomodoro.skip(synctus_core::now_ms());
+                // Skipping still finishes the round, so it goes through the same
+                // handler as the deadline and credits its minutes.
+                let event = self.pomodoro.skip(synctus_core::now_ms());
+                self.handle_pomodoro_event(event);
                 self.publish()
             }
             BridgeCommand::SetTodos { items } => {
@@ -237,10 +287,78 @@ impl Bridge {
                     .send(Command::PublishTodos(self.todos.clone()))?;
                 self.publish()
             }
+            BridgeCommand::RestoreProgress {
+                focus_today_min,
+                streak_days,
+            } => {
+                self.focus_today_min = focus_today_min;
+                self.streak_days = streak_days;
+                self.publish()
+            }
             BridgeCommand::Reconfigure { config } => {
                 self.pomodoro.set_config(config.pomodoro);
                 self.cfg = (*config).clone();
                 self.client.send(Command::Reconnect(config))
+            }
+        }
+    }
+
+    /// Build a nag body from what the peer last reported.
+    ///
+    /// Same reasoning as the desktop: naming what they are doing and how far
+    /// behind they are is what makes it work.
+    fn nag_text(&self) -> Option<String> {
+        let now = synctus_core::now_ms();
+        let peer = self.peers.primary(now, self.cfg.peer_stale_ms())?;
+
+        if peer.is_focusing() {
+            if let Some(app) = peer.foreground_app() {
+                if self.cfg.accountability.is_distracting(app) {
+                    return Some(format!("你在专注中开着 {app}，专心点"));
+                }
+            }
+        }
+
+        if peer.goal_min > 0 && !peer.goal_met() {
+            let left = peer.goal_min.saturating_sub(peer.focus_today_min);
+            return Some(format!(
+                "今天还差 {left} 分钟，我已经做了 {} 分钟了",
+                self.focus_today_min
+            ));
+        }
+
+        None
+    }
+
+    /// Watch the foreground app during a focus round.
+    fn check_distraction(&mut self) {
+        let now = synctus_core::now_ms();
+        let focusing =
+            self.pomodoro.state().phase == PomodoroPhase::Focus && !self.pomodoro.state().paused();
+
+        let verdict = self.distraction.update(
+            self.last_sensors.foreground.as_ref(),
+            focusing,
+            &self.cfg.accountability,
+            now,
+        );
+
+        if let Distraction::Started { app } = verdict {
+            let remaining = self.pomodoro.state().remaining_text(now);
+            // Surfaced as a Nudge event so the service raises the same
+            // high-priority notification it uses for the peer's pokes; the point
+            // is to be hard to ignore.
+            self.pending.push(BridgeEvent::Nudge {
+                title: "👀 还在专注中".to_string(),
+                body: format!("{app} 打开了，这一轮还剩 {remaining}"),
+                kind: "distraction".to_string(),
+                urgent: true,
+            });
+
+            if self.cfg.accountability.report_distraction_to_peer {
+                let mut nudge = Nudge::new(NudgeKind::Nag, self.cfg.device_name.clone());
+                nudge.text = Some(format!("我在专注时打开了 {app}，盯着我"));
+                let _ = self.client.nudge(nudge);
             }
         }
     }
@@ -293,6 +411,14 @@ impl Bridge {
                 .count() as u32;
         }
 
+        // The accountability numbers ride along with the pomodoro permission:
+        // same activity, same kind of information.
+        if privacy.share_pomodoro {
+            snap.focus_today_min = self.focus_today_min;
+            snap.goal_min = self.cfg.accountability.daily_goal_min;
+            snap.streak_days = self.streak_days;
+        }
+
         self.client.publish(snap)
     }
 
@@ -305,18 +431,39 @@ impl Bridge {
         serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())
     }
 
-    fn drain(&mut self) {
-        // Pomodoro first, so a boundary reached between polls is reported.
-        let now = synctus_core::now_ms();
-        match self.pomodoro.tick(now) {
+    /// React to a pomodoro boundary.
+    ///
+    /// Shared by the poll tick and by an explicit skip: a skipped round still
+    /// finished, so it must still credit its minutes. Routing both through here is
+    /// what keeps the two paths from drifting.
+    fn handle_pomodoro_event(&mut self, event: PomodoroEvent) {
+        match event {
             PomodoroEvent::Nothing => {}
-            PomodoroEvent::FocusFinished(next) => {
+            PomodoroEvent::FocusFinished { next, minutes } => {
+                let goal = self.cfg.accountability.daily_goal_min;
+                let was_met = goal > 0 && self.focus_today_min >= goal;
+                self.focus_today_min = self.focus_today_min.saturating_add(minutes);
+                let now_met = goal > 0 && self.focus_today_min >= goal;
+
                 self.pending.push(BridgeEvent::Pomodoro {
                     phase: next.label().to_string(),
                     remaining: "00:00".to_string(),
                     finished: true,
-                    message: format!("专注完成，该{}了", next.label()),
+                    message: format!(
+                        "专注 {minutes} 分钟完成，今日累计 {} 分钟",
+                        self.focus_today_min
+                    ),
                 });
+
+                // Only the round that crosses the goal gets a celebration.
+                if now_met && !was_met {
+                    self.streak_days = self.streak_days.saturating_add(1);
+                    self.pending.push(BridgeEvent::GoalReached {
+                        goal_min: goal,
+                        streak_days: self.streak_days,
+                    });
+                }
+
                 let _ = self.publish();
             }
             PomodoroEvent::BreakFinished => {
@@ -329,6 +476,13 @@ impl Bridge {
                 let _ = self.publish();
             }
         }
+    }
+
+    fn drain(&mut self) {
+        // Pomodoro first, so a boundary reached between polls is reported.
+        let now = synctus_core::now_ms();
+        let event = self.pomodoro.tick(now);
+        self.handle_pomodoro_event(event);
 
         let mut batch = Vec::new();
         while let Ok(event) = self.events.try_recv() {
@@ -376,10 +530,15 @@ impl Bridge {
                         self.pomodoro.start_focus(now);
                         let _ = self.publish();
                     }
+                    // A nag is allowed to interrupt, but only if the receiver
+                    // agreed to that in their own settings.
+                    let urgent =
+                        nudge.kind.is_urgent() && self.cfg.accountability.allow_urgent_nudges;
                     self.pending.push(BridgeEvent::Nudge {
                         title: format!("{} {}", nudge.kind.emoji(), nudge.from_name),
                         body: nudge.body(),
                         kind: format!("{:?}", nudge.kind),
+                        urgent,
                     });
                 }
                 Event::PeerPresence { device_id, online } => {
@@ -419,20 +578,47 @@ impl Bridge {
             detail: peer_detail(peer, now, stale),
             meta: peer_meta(peer, now),
             stale,
+            focus_today_min: peer.focus_today_min,
+            goal_min: peer.goal_min,
+            streak_days: peer.streak_days,
+            focusing: !stale && peer.is_focusing(),
+            // Focusing on paper, but with a distracting app open. Judged against
+            // *our* list: the receiver decides what counts as slacking.
+            slacking: !stale
+                && peer.is_focusing()
+                && peer
+                    .foreground_app()
+                    .map(|app| self.cfg.accountability.is_distracting(app))
+                    .unwrap_or(false),
         })
     }
 
     /// Current local state, for the notification's own line.
     pub fn local_status_json(&self) -> String {
         let state = self.pomodoro.state();
+        let goal = self.cfg.accountability.daily_goal_min;
+        let now = synctus_core::now_ms();
+        let (_, peer_minutes) =
+            self.peers
+                .focus_comparison(self.focus_today_min, now, self.cfg.peer_stale_ms());
+
         let value = serde_json::json!({
             "presence": self.effective_presence().label(),
             "pomodoro_phase": state.phase.label(),
-            "pomodoro_remaining": state.remaining_text(synctus_core::now_ms()),
+            "pomodoro_remaining": state.remaining_text(now),
             "pomodoro_active": state.phase != PomodoroPhase::Idle,
             "pomodoro_paused": state.paused(),
             "completed_today": state.completed_today,
             "connected": matches!(self.conn, ConnState::Online),
+            // The accountability line the notification shows.
+            "focus_today_min": self.focus_today_min,
+            "goal_min": goal,
+            "streak_days": self.streak_days,
+            "goal_met": goal > 0 && self.focus_today_min >= goal,
+            "peer_focus_today_min": peer_minutes,
+            "peer_focusing": self.peers.is_focusing(now, self.cfg.peer_stale_ms()),
+            "distracted": self.distraction.is_distracted(),
+            "distracted_by": self.distraction.current_app(),
         });
         value.to_string()
     }
@@ -613,9 +799,21 @@ mod tests {
         assert!(matches!(
             cmd,
             BridgeCommand::Nudge {
-                kind: NudgeKind::Knock
+                kind: NudgeKind::Knock,
+                text: None
             }
         ));
+
+        // The nag kind and an explicit text both survive the round trip.
+        let cmd: BridgeCommand =
+            serde_json::from_str(r#"{"type":"nudge","kind":"nag","text":"起来干活"}"#).unwrap();
+        match cmd {
+            BridgeCommand::Nudge { kind, text } => {
+                assert_eq!(kind, NudgeKind::Nag);
+                assert_eq!(text.as_deref(), Some("起来干活"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
@@ -800,6 +998,154 @@ mod tests {
         );
         let privacy = &bridge.cfg.privacy;
         assert!(privacy.is_blocked("com.secret.vault"));
+        bridge.stop();
+    }
+
+    // --- accountability ---------------------------------------------------
+
+    #[test]
+    fn restored_progress_appears_in_the_local_status() {
+        let mut bridge = Bridge::with_config(paired_config()).unwrap();
+        bridge
+            .command(r#"{"type":"restore_progress","focus_today_min":75,"streak_days":4}"#)
+            .unwrap();
+
+        let status: serde_json::Value = serde_json::from_str(&bridge.local_status_json()).unwrap();
+        assert_eq!(status["focus_today_min"], serde_json::json!(75));
+        assert_eq!(status["streak_days"], serde_json::json!(4));
+        bridge.stop();
+    }
+
+    #[test]
+    fn finishing_a_round_credits_minutes_and_reports_the_goal() {
+        let cfg = ClientConfig {
+            pomodoro: synctus_core::config::PomodoroConfig {
+                focus_min: 25,
+                ..Default::default()
+            },
+            accountability: synctus_core::config::Accountability {
+                // One round is enough to hit the goal, so a single tick exercises
+                // both the credit and the celebration.
+                daily_goal_min: 25,
+                ..Default::default()
+            },
+            ..paired_config()
+        };
+        let mut bridge = Bridge::with_config(cfg).unwrap();
+
+        bridge.command(r#"{"type":"start_focus"}"#).unwrap();
+        // Skip fires the same path the deadline would.
+        bridge.command(r#"{"type":"skip_phase"}"#).unwrap();
+
+        let events: Vec<serde_json::Value> = serde_json::from_str(&bridge.poll()).unwrap();
+        let kinds: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
+        assert!(
+            kinds.contains(&"pomodoro"),
+            "expected a pomodoro event, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"goal_reached"),
+            "expected a goal_reached event, got {kinds:?}"
+        );
+
+        let status: serde_json::Value = serde_json::from_str(&bridge.local_status_json()).unwrap();
+        assert_eq!(status["focus_today_min"], serde_json::json!(25));
+        assert_eq!(status["goal_met"], serde_json::json!(true));
+        assert_eq!(status["streak_days"], serde_json::json!(1));
+        bridge.stop();
+    }
+
+    #[test]
+    fn the_goal_is_celebrated_once() {
+        let cfg = ClientConfig {
+            pomodoro: synctus_core::config::PomodoroConfig {
+                focus_min: 25,
+                ..Default::default()
+            },
+            accountability: synctus_core::config::Accountability {
+                daily_goal_min: 25,
+                ..Default::default()
+            },
+            ..paired_config()
+        };
+        let mut bridge = Bridge::with_config(cfg).unwrap();
+
+        for _ in 0..3 {
+            bridge.command(r#"{"type":"start_focus"}"#).unwrap();
+            bridge.command(r#"{"type":"skip_phase"}"#).unwrap();
+        }
+
+        let events: Vec<serde_json::Value> = serde_json::from_str(&bridge.poll()).unwrap();
+        let celebrations = events
+            .iter()
+            .filter(|e| e["type"] == serde_json::json!("goal_reached"))
+            .count();
+        assert_eq!(celebrations, 1, "extra rounds must not re-celebrate");
+
+        let status: serde_json::Value = serde_json::from_str(&bridge.local_status_json()).unwrap();
+        assert_eq!(status["focus_today_min"], serde_json::json!(75));
+        assert_eq!(status["streak_days"], serde_json::json!(1));
+        bridge.stop();
+    }
+
+    #[test]
+    fn distraction_during_a_focus_round_raises_an_urgent_event() {
+        let cfg = ClientConfig {
+            accountability: synctus_core::config::Accountability {
+                warn_on_distraction: true,
+                distracting_apps: vec!["bilibili".into()],
+                // Fire on the first sample rather than waiting for the grace
+                // period, which the core tests already cover.
+                distraction_grace_secs: 0,
+                ..Default::default()
+            },
+            ..paired_config()
+        };
+        let mut bridge = Bridge::with_config(cfg).unwrap();
+
+        bridge.command(r#"{"type":"start_focus"}"#).unwrap();
+        bridge
+            .command(r#"{"type":"publish","foreground":{"app":"com.bilibili.app"}}"#)
+            .unwrap();
+
+        let events: Vec<serde_json::Value> = serde_json::from_str(&bridge.poll()).unwrap();
+        let warning = events
+            .iter()
+            .find(|e| e["kind"] == serde_json::json!("distraction"))
+            .expect("expected a distraction event");
+        assert_eq!(warning["urgent"], serde_json::json!(true));
+        assert!(warning["body"].as_str().unwrap().contains("bilibili"));
+
+        let status: serde_json::Value = serde_json::from_str(&bridge.local_status_json()).unwrap();
+        assert_eq!(status["distracted"], serde_json::json!(true));
+        bridge.stop();
+    }
+
+    #[test]
+    fn nothing_is_reported_outside_a_focus_round() {
+        let cfg = ClientConfig {
+            accountability: synctus_core::config::Accountability {
+                warn_on_distraction: true,
+                distracting_apps: vec!["bilibili".into()],
+                distraction_grace_secs: 0,
+                ..Default::default()
+            },
+            ..paired_config()
+        };
+        let mut bridge = Bridge::with_config(cfg).unwrap();
+
+        // No focus round started: leisure time is not the tool's business.
+        bridge
+            .command(r#"{"type":"publish","foreground":{"app":"com.bilibili.app"}}"#)
+            .unwrap();
+
+        let events: Vec<serde_json::Value> = serde_json::from_str(&bridge.poll()).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e["kind"] == serde_json::json!("distraction")),
+            "must not warn outside a focus round"
+        );
         bridge.stop();
     }
 

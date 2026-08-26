@@ -80,6 +80,92 @@ impl Default for PomodoroConfig {
     }
 }
 
+/// The accountability settings — what turns a status widget into something that
+/// actually keeps two people working.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Accountability {
+    /// Daily focus target in minutes. 0 disables goals and streaks entirely.
+    pub daily_goal_min: u32,
+
+    /// Warn *me* when I open a distracting app during a focus round.
+    pub warn_on_distraction: bool,
+    /// Apps that count as a distraction. Matched case-insensitively as a
+    /// substring, so `bilibili` catches both the browser tab and the app.
+    pub distracting_apps: Vec<String>,
+    /// Seconds a distracting app must stay in the foreground before it counts.
+    /// Prevents a flicker while alt-tabbing from tripping the alarm.
+    pub distraction_grace_secs: u32,
+
+    /// Tell the peer when I get distracted during a focus round.
+    ///
+    /// Off by default: being watched is something to opt into, not something a
+    /// tool should assume. With it off the warning stays local.
+    pub report_distraction_to_peer: bool,
+
+    /// Let the peer's nag break through my do-not-disturb.
+    pub allow_urgent_nudges: bool,
+
+    /// Automatically congratulate the peer when they finish a round or hit their
+    /// goal, so encouragement does not depend on someone remembering.
+    pub auto_cheer: bool,
+}
+
+impl Default for Accountability {
+    fn default() -> Self {
+        Self {
+            // Four classic pomodoros. A goal of zero would make the whole feature
+            // invisible, and a default of zero is how features go unused.
+            daily_goal_min: 100,
+            warn_on_distraction: true,
+            distracting_apps: default_distracting_apps(),
+            distraction_grace_secs: 30,
+            report_distraction_to_peer: false,
+            allow_urgent_nudges: true,
+            auto_cheer: true,
+        }
+    }
+}
+
+impl Accountability {
+    /// Whether `app` is on the distraction list.
+    pub fn is_distracting(&self, app: &str) -> bool {
+        let app = app.to_ascii_lowercase();
+        self.distracting_apps
+            .iter()
+            .any(|d| !d.is_empty() && app.contains(&d.to_ascii_lowercase()))
+    }
+
+    pub fn goals_enabled(&self) -> bool {
+        self.daily_goal_min > 0
+    }
+}
+
+/// A starting list the user is expected to edit.
+///
+/// Deliberately generic and short: guessing someone's particular time sinks is
+/// futile, but an empty list means the feature does nothing until configured.
+fn default_distracting_apps() -> Vec<String> {
+    [
+        "bilibili",
+        "youtube",
+        "tiktok",
+        "douyin",
+        "netflix",
+        "steam",
+        "epicgames",
+        "discord",
+        "twitter",
+        "instagram",
+        "reddit",
+        "zhihu",
+        "weibo",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClientConfig {
@@ -100,6 +186,7 @@ pub struct ClientConfig {
 
     pub privacy: Privacy,
     pub pomodoro: PomodoroConfig,
+    pub accountability: Accountability,
 
     /// How often to sample local sensors, in seconds.
     pub poll_secs: u64,
@@ -133,6 +220,7 @@ impl Default for ClientConfig {
             device_name: default_device_name(),
             privacy: Privacy::default(),
             pomodoro: PomodoroConfig::default(),
+            accountability: Accountability::default(),
             poll_secs: 5,
             away_after_secs: 300,
             peer_stale_secs: 90,

@@ -265,6 +265,17 @@ pub struct StatusSnapshot {
     /// Seconds since the last input event, when the platform exposes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_secs: Option<u32>,
+    /// Minutes focused today. This is the number that actually holds someone
+    /// accountable, so it is synced separately from the round counter.
+    #[serde(default)]
+    pub focus_today_min: u32,
+    /// Daily focus target in minutes. Synced so the peer's progress means
+    /// something rather than being a bare number.
+    #[serde(default)]
+    pub goal_min: u32,
+    /// Consecutive days the goal was met, including today once it is met.
+    #[serde(default)]
+    pub streak_days: u32,
 }
 
 impl StatusSnapshot {
@@ -282,6 +293,9 @@ impl StatusSnapshot {
             todos_open: 0,
             todos_done_today: 0,
             idle_secs: None,
+            focus_today_min: 0,
+            goal_min: 0,
+            streak_days: 0,
         }
     }
 
@@ -290,9 +304,36 @@ impl StatusSnapshot {
     pub fn is_stale(&self, now: i64, max_age_ms: i64) -> bool {
         now.saturating_sub(self.at) > max_age_ms
     }
+
+    /// Progress towards the daily goal, 0.0 to 1.0. Zero when no goal is set.
+    pub fn goal_progress(&self) -> f32 {
+        if self.goal_min == 0 {
+            return 0.0;
+        }
+        (self.focus_today_min as f32 / self.goal_min as f32).clamp(0.0, 1.0)
+    }
+
+    pub fn goal_met(&self) -> bool {
+        self.goal_min > 0 && self.focus_today_min >= self.goal_min
+    }
+
+    /// Whether this device claims to be in a focus round right now.
+    pub fn is_focusing(&self) -> bool {
+        self.pomodoro
+            .map(|p| p.phase == PomodoroPhase::Focus && !p.paused())
+            .unwrap_or(false)
+    }
+
+    /// The foreground app as a single comparable string, for distraction checks.
+    pub fn foreground_app(&self) -> Option<&str> {
+        self.foreground.as_ref().map(|f| f.app.as_str())
+    }
 }
 
-/// An interaction sent to the peer: the "敲一敲" poke and friends.
+/// An interaction sent to the peer.
+///
+/// The list is ordered by how often it gets used for the tool's actual purpose:
+/// nagging comes first, comfort last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NudgeKind {
@@ -304,6 +345,12 @@ pub enum NudgeKind {
     Rest,
     /// "Let's focus together" — invites a synced pomodoro.
     FocusTogether,
+    /// "Stop slacking off." Sent when the peer is supposed to be focusing but
+    /// clearly is not.
+    Nag,
+    /// Acknowledges a finished round or a met goal. Praise is the other half of
+    /// accountability; without it the tool is only ever unpleasant.
+    Cheer,
 }
 
 impl NudgeKind {
@@ -314,6 +361,8 @@ impl NudgeKind {
             NudgeKind::Coffee => "☕",
             NudgeKind::Rest => "🛋",
             NudgeKind::FocusTogether => "🍅",
+            NudgeKind::Nag => "👀",
+            NudgeKind::Cheer => "🎉",
         }
     }
 
@@ -324,15 +373,42 @@ impl NudgeKind {
             NudgeKind::Coffee => "请喝咖啡",
             NudgeKind::Rest => "去休息",
             NudgeKind::FocusTogether => "一起专注",
+            NudgeKind::Nag => "别摸鱼了",
+            NudgeKind::Cheer => "夸一夸",
         }
     }
 
-    pub const ALL: [NudgeKind; 5] = [
+    /// Sentence used when the sender adds no text of their own.
+    fn default_text(self) -> &'static str {
+        match self {
+            NudgeKind::Knock => "敲了敲你",
+            NudgeKind::Hug => "抱了抱你",
+            NudgeKind::Coffee => "请你喝咖啡",
+            NudgeKind::Rest => "让你去休息",
+            NudgeKind::FocusTogether => "邀你一起专注",
+            NudgeKind::Nag => "发现你在摸鱼",
+            NudgeKind::Cheer => "为你鼓掌",
+        }
+    }
+
+    /// Whether this should break through do-not-disturb.
+    ///
+    /// A nag that waits until the peer happens to look at their screen is
+    /// useless, so it is the one interaction allowed to interrupt. Everything
+    /// else respects [`Presence::Busy`].
+    pub fn is_urgent(self) -> bool {
+        matches!(self, NudgeKind::Nag)
+    }
+
+    /// Ordered for the menus: the accountability actions first.
+    pub const ALL: [NudgeKind; 7] = [
+        NudgeKind::Nag,
+        NudgeKind::FocusTogether,
+        NudgeKind::Cheer,
         NudgeKind::Knock,
         NudgeKind::Hug,
         NudgeKind::Coffee,
         NudgeKind::Rest,
-        NudgeKind::FocusTogether,
     ];
 }
 
@@ -363,10 +439,10 @@ impl Nudge {
         match &self.text {
             Some(t) if !t.is_empty() => format!("{} {}：{t}", self.kind.emoji(), self.from_name),
             _ => format!(
-                "{} {} {}了你",
+                "{} {} {}",
                 self.kind.emoji(),
                 self.from_name,
-                self.kind.label()
+                self.kind.default_text()
             ),
         }
     }

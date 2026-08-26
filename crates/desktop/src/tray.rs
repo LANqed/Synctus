@@ -35,8 +35,16 @@ mod id {
 pub struct Tray {
     // Held to keep the icon alive; dropping it removes the tray entry.
     _icon: TrayIcon,
-    /// Rebuilt when the pomodoro label changes.
+    /// Kept so the pomodoro label can be updated in place.
     toggle_item: MenuItem,
+    /// The nag entry. Disabled unless the peer is actually in a focus round, so
+    /// the menu itself tells you whether nagging would mean anything.
+    nag_item: MenuItem,
+    /// Shows today's two focus totals; the most useful line in the menu.
+    summary_item: MenuItem,
+    /// The tooltip is the only always-visible surface when the overlay is hidden,
+    /// so it carries the comparison too.
+    icon_handle: TrayIcon,
 }
 
 impl Tray {
@@ -44,8 +52,40 @@ impl Tray {
     pub fn new(app_name: &str) -> Result<Self> {
         let menu = Menu::new();
 
-        let nudges = Submenu::new("互动", true);
+        // A disabled item used as a header. `muda` has no label widget, so a
+        // permanently disabled entry is the idiomatic way to show read-only text.
+        let summary_item = MenuItem::with_id("summary", "今日专注　—", false, None);
+        menu.append(&summary_item).context("添加统计菜单失败")?;
+        menu.append(&PredefinedMenuItem::separator()).ok();
+
+        // The two accountability actions are top-level: a nag hidden two clicks
+        // deep does not get sent.
+        let nag_item = MenuItem::with_id(
+            format!("{}{:?}", id::NUDGE_PREFIX, NudgeKind::Nag),
+            format!("{} {}", NudgeKind::Nag.emoji(), NudgeKind::Nag.label()),
+            false,
+            None,
+        );
+        menu.append(&nag_item).context("添加督促菜单失败")?;
+
+        menu.append(&MenuItem::with_id(
+            format!("{}{:?}", id::NUDGE_PREFIX, NudgeKind::FocusTogether),
+            format!(
+                "{} {}",
+                NudgeKind::FocusTogether.emoji(),
+                NudgeKind::FocusTogether.label()
+            ),
+            true,
+            None,
+        ))
+        .context("添加督促菜单失败")?;
+
+        let nudges = Submenu::new("其他互动", true);
         for kind in NudgeKind::ALL {
+            // Already promoted to the top level.
+            if matches!(kind, NudgeKind::Nag | NudgeKind::FocusTogether) {
+                continue;
+            }
             nudges
                 .append(&MenuItem::with_id(
                     format!("{}{:?}", id::NUDGE_PREFIX, kind),
@@ -122,14 +162,55 @@ impl Tray {
             .context("创建托盘图标失败")?;
 
         Ok(Self {
+            // `TrayIcon` is refcounted internally, so the clone is a handle to the
+            // same icon rather than a second tray entry.
+            icon_handle: icon.clone(),
             _icon: icon,
             toggle_item,
+            nag_item,
+            summary_item,
         })
     }
 
     /// Keep the pomodoro entry's label in sync with the timer.
     pub fn set_pomodoro_label(&self, label: &str) {
         self.toggle_item.set_text(label);
+    }
+
+    /// Update the accountability parts of the menu and the tooltip.
+    ///
+    /// `peer_focusing` gates the nag entry: an action that does nothing useful
+    /// should look unavailable rather than silently disappoint.
+    pub fn set_accountability(
+        &self,
+        mine: u32,
+        theirs: u32,
+        goal: u32,
+        peer_focusing: bool,
+        peer_slacking: bool,
+    ) {
+        let summary = if goal > 0 {
+            format!("今日专注　我 {mine} / TA {theirs}　目标 {goal}")
+        } else {
+            format!("今日专注　我 {mine} / TA {theirs}")
+        };
+        self.summary_item.set_text(&summary);
+
+        self.nag_item.set_enabled(peer_focusing);
+        self.nag_item.set_text(if peer_slacking {
+            // Say what was caught, so the menu entry itself is the evidence.
+            format!("{} 抓到了，别摸鱼了", NudgeKind::Nag.emoji())
+        } else {
+            format!("{} {}", NudgeKind::Nag.emoji(), NudgeKind::Nag.label())
+        });
+
+        // The tooltip is what a user sees when the overlay is hidden.
+        let tooltip = if goal > 0 {
+            format!("Synctus\n今日专注：我 {mine} / TA {theirs}（目标 {goal} 分钟）")
+        } else {
+            format!("Synctus\n今日专注：我 {mine} / TA {theirs}")
+        };
+        let _ = self.icon_handle.set_tooltip(Some(tooltip));
     }
 
     /// Drain tray and menu events, mapping them to requests.

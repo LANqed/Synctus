@@ -34,7 +34,7 @@ sealed interface BridgeCommand {
 
     @Serializable
     @SerialName("nudge")
-    data class Nudge(val kind: String) : BridgeCommand
+    data class Nudge(val kind: String, val text: String? = null) : BridgeCommand
 
     @Serializable
     @SerialName("set_presence")
@@ -60,6 +60,19 @@ sealed interface BridgeCommand {
     @SerialName("set_todos")
     data class SetTodos(val items: List<Todo>) : BridgeCommand
 
+    /**
+     * Tell the engine where today's focus accounting left off.
+     *
+     * Android owns the persistence, so after a service restart the engine has to
+     * be told rather than reading a file itself.
+     */
+    @Serializable
+    @SerialName("restore_progress")
+    data class RestoreProgress(
+        @SerialName("focus_today_min") val focusTodayMin: Int,
+        @SerialName("streak_days") val streakDays: Int,
+    ) : BridgeCommand
+
     @Serializable
     @SerialName("reconfigure")
     data class Reconfigure(val config: ClientConfig) : BridgeCommand
@@ -84,11 +97,30 @@ sealed interface BridgeEvent {
         val detail: String,
         val meta: String,
         val stale: Boolean,
-    ) : BridgeEvent
+        @SerialName("focus_today_min") val focusTodayMin: Int = 0,
+        @SerialName("goal_min") val goalMin: Int = 0,
+        @SerialName("streak_days") val streakDays: Int = 0,
+        /** In a focus round right now. Gates the nag button. */
+        val focusing: Boolean = false,
+        /** Focusing on paper, but with a distracting app open. */
+        val slacking: Boolean = false,
+    ) : BridgeEvent {
+        /** Progress towards their own goal, 0.0 to 1.0. */
+        fun goalProgress(): Float =
+            if (goalMin <= 0) 0f else (focusTodayMin.toFloat() / goalMin).coerceIn(0f, 1f)
+
+        fun goalMet(): Boolean = goalMin > 0 && focusTodayMin >= goalMin
+    }
 
     @Serializable
     @SerialName("nudge")
-    data class Nudge(val title: String, val body: String, val kind: String) : BridgeEvent
+    data class Nudge(
+        val title: String,
+        val body: String,
+        val kind: String,
+        /** Whether it should break through do-not-disturb. */
+        val urgent: Boolean = false,
+    ) : BridgeEvent
 
     @Serializable
     @SerialName("pomodoro")
@@ -97,6 +129,14 @@ sealed interface BridgeEvent {
         val remaining: String,
         val finished: Boolean,
         val message: String,
+    ) : BridgeEvent
+
+    /** The daily goal was reached; worth its own celebration. */
+    @Serializable
+    @SerialName("goal_reached")
+    data class GoalReached(
+        @SerialName("goal_min") val goalMin: Int,
+        @SerialName("streak_days") val streakDays: Int,
     ) : BridgeEvent
 
     @Serializable
@@ -153,7 +193,24 @@ data class LocalStatus(
     @SerialName("pomodoro_paused") val pomodoroPaused: Boolean = false,
     @SerialName("completed_today") val completedToday: Int = 0,
     val connected: Boolean = false,
-)
+    // --- accountability ---
+    @SerialName("focus_today_min") val focusTodayMin: Int = 0,
+    @SerialName("goal_min") val goalMin: Int = 0,
+    @SerialName("streak_days") val streakDays: Int = 0,
+    @SerialName("goal_met") val goalMet: Boolean = false,
+    @SerialName("peer_focus_today_min") val peerFocusTodayMin: Int = 0,
+    @SerialName("peer_focusing") val peerFocusing: Boolean = false,
+    /** A distracting app is open during my own focus round. */
+    val distracted: Boolean = false,
+    @SerialName("distracted_by") val distractedBy: String? = null,
+) {
+    /** Progress towards my goal, 0.0 to 1.0. */
+    fun goalProgress(): Float =
+        if (goalMin <= 0) 0f else (focusTodayMin.toFloat() / goalMin).coerceIn(0f, 1f)
+
+    /** Minutes still needed today. */
+    fun remainingMin(): Int = (goalMin - focusTodayMin).coerceAtLeast(0)
+}
 
 // --- configuration ----------------------------------------------------------
 
@@ -180,6 +237,51 @@ data class PomodoroConfig(
 )
 
 /**
+ * The accountability settings — what turns a status widget into something that
+ * actually keeps two people working.
+ *
+ * Defaults mirror the Rust side; a mismatch would silently change behaviour
+ * between the settings screen and the engine.
+ */
+@Serializable
+data class Accountability(
+    /** Daily focus target in minutes. 0 disables goals and streaks. */
+    @SerialName("daily_goal_min") val dailyGoalMin: Int = 100,
+    /** Warn me when I open a distracting app during a focus round. */
+    @SerialName("warn_on_distraction") val warnOnDistraction: Boolean = true,
+    @SerialName("distracting_apps") val distractingApps: List<String> = defaultDistractingApps,
+    @SerialName("distraction_grace_secs") val distractionGraceSecs: Int = 30,
+    /** Off by default: being watched is something to opt into. */
+    @SerialName("report_distraction_to_peer") val reportDistractionToPeer: Boolean = false,
+    @SerialName("allow_urgent_nudges") val allowUrgentNudges: Boolean = true,
+    @SerialName("auto_cheer") val autoCheer: Boolean = true,
+) {
+    companion object {
+        /**
+         * A starting list the user is expected to edit.
+         *
+         * Android package names rather than executables, matched as a
+         * case-insensitive substring by the Rust side.
+         */
+        val defaultDistractingApps = listOf(
+            "bilibili",
+            "youtube",
+            "tiktok",
+            "douyin",
+            "netflix",
+            "steam",
+            "epicgames",
+            "discord",
+            "twitter",
+            "instagram",
+            "reddit",
+            "zhihu",
+            "weibo",
+        )
+    }
+}
+
+/**
  * Mirrors the Rust `ClientConfig`. Defaults are duplicated here so the settings
  * screen can render before the native library has been asked for anything.
  */
@@ -193,6 +295,7 @@ data class ClientConfig(
     @SerialName("device_name") val deviceName: String = "Android",
     val privacy: Privacy = Privacy(),
     val pomodoro: PomodoroConfig = PomodoroConfig(),
+    val accountability: Accountability = Accountability(),
     @SerialName("poll_secs") val pollSecs: Long = 15,
     @SerialName("away_after_secs") val awayAfterSecs: Int = 0,
     @SerialName("peer_stale_secs") val peerStaleSecs: Long = 90,
@@ -233,12 +336,17 @@ object NudgeKey {
     const val COFFEE = "coffee"
     const val REST = "rest"
     const val FOCUS_TOGETHER = "focus_together"
+    const val NAG = "nag"
+    const val CHEER = "cheer"
 
+    /** Ordered with the accountability actions first, as on the desktop. */
     val all = listOf(
+        Triple(NAG, "👀", "别摸鱼了"),
+        Triple(FOCUS_TOGETHER, "🍅", "一起专注"),
+        Triple(CHEER, "🎉", "夸一夸"),
         Triple(KNOCK, "👋", "敲一敲"),
         Triple(HUG, "🤗", "抱抱"),
         Triple(COFFEE, "☕", "请喝咖啡"),
         Triple(REST, "🛋", "去休息"),
-        Triple(FOCUS_TOGETHER, "🍅", "一起专注"),
     )
 }

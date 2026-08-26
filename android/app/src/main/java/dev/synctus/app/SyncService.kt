@@ -43,6 +43,12 @@ class SyncService : Service() {
     private lateinit var store: Store
     private lateinit var sensors: Sensors
 
+    /**
+     * Day the peer was last congratulated, so [BridgeEvent.Peer] arriving every
+     * poll does not produce a stream of cheers.
+     */
+    private var cheeredPeerDate: String? = null
+
     override fun onCreate() {
         super.onCreate()
         store = Store(this)
@@ -88,6 +94,17 @@ class SyncService : Service() {
             }
             // Publish the to-do list once so the peer has it on connect.
             sendCommand(BridgeCommand.SetTodos(store.loadTodos()))
+
+            // The engine starts from zero, so tell it where today left off.
+            // Without this a service restart would silently reset the day's
+            // progress — exactly the number this whole thing is about.
+            val progress = store.loadProgress()
+            sendCommand(
+                BridgeCommand.RestoreProgress(
+                    focusTodayMin = progress.focusTodayMin,
+                    streakDays = progress.streakDays,
+                )
+            )
         }
 
         if (loopRunning.compareAndSet(false, true)) {
@@ -144,7 +161,22 @@ class SyncService : Service() {
                     )
                 }
 
-                is BridgeEvent.Peer -> update { it.copy(peer = event) }
+                is BridgeEvent.Peer -> {
+                    // Congratulate once when they reach their goal. Encouragement
+                    // that depends on someone remembering to send it does not
+                    // happen, so it is automatic.
+                    val autoCheer = state.value.config?.accountability?.autoCheer ?: true
+                    if (autoCheer && event.goalMet() && !cheeredPeerToday()) {
+                        markPeerCheered()
+                        sendCommand(
+                            BridgeCommand.Nudge(
+                                kind = NudgeKey.CHEER,
+                                text = "今天 ${event.focusTodayMin} 分钟，达标了！",
+                            )
+                        )
+                    }
+                    update { it.copy(peer = event) }
+                }
 
                 is BridgeEvent.Nudge -> {
                     if (state.value.config?.muteNudges != true) {
@@ -153,7 +185,20 @@ class SyncService : Service() {
                     update { it.copy(lastNudge = event, lastNudgeAt = System.currentTimeMillis()) }
                 }
 
-                is BridgeEvent.Pomodoro -> Notifications.showPomodoro(this, event)
+                is BridgeEvent.Pomodoro -> {
+                    Notifications.showPomodoro(this, event)
+                    // The engine keeps the totals in memory only, so persist them
+                    // after every boundary: the process can be killed at any time.
+                    persistProgress()
+                }
+
+                is BridgeEvent.GoalReached -> {
+                    // The store decides the streak, so its answer wins over the
+                    // engine's in-memory guess.
+                    val streak = store.registerGoalMet()
+                    Notifications.showGoalReached(this, event.goalMin, streak)
+                    persistProgress()
+                }
 
                 is BridgeEvent.PeerTodos -> update { it.copy(peerTodos = event.items) }
 
@@ -172,6 +217,28 @@ class SyncService : Service() {
     } catch (e: Exception) {
         LocalStatus()
     }
+
+    /**
+     * Write the engine's focus totals to disk.
+     *
+     * Called after every pomodoro boundary rather than on a timer: the process can
+     * be killed at any moment, and losing today's minutes is the one piece of state
+     * that would actually annoy someone.
+     */
+    private fun persistProgress() {
+        val local = readLocalStatus()
+        store.saveProgress(local.focusTodayMin, local.streakDays)
+        update { it.copy(local = local) }
+    }
+
+    /** Whether the peer was already congratulated today. */
+    private fun cheeredPeerToday(): Boolean = cheeredPeerDate == todayKey()
+
+    private fun markPeerCheered() {
+        cheeredPeerDate = todayKey()
+    }
+
+    private fun todayKey(): String = (System.currentTimeMillis() / 86_400_000L).toString()
 
     private fun startForegroundNotification() {
         val notification = buildNotification()
@@ -222,6 +289,13 @@ class SyncService : Service() {
             // Was unpaired until now; start the engine.
             NativeBridge.start(SynctusJson.encodeToString(config)).onSuccess {
                 sendCommand(BridgeCommand.SetTodos(store.loadTodos()))
+                val progress = store.loadProgress()
+                sendCommand(
+                    BridgeCommand.RestoreProgress(
+                        focusTodayMin = progress.focusTodayMin,
+                        streakDays = progress.streakDays,
+                    )
+                )
                 if (loopRunning.compareAndSet(false, true)) {
                     scope.launch { runLoop(config.pollSecs) }
                 }
@@ -247,6 +321,9 @@ class SyncService : Service() {
     }
 
     override fun onDestroy() {
+        // Save before tearing down: whatever minutes were earned since the last
+        // boundary would otherwise be lost.
+        persistProgress()
         scope.cancel()
         loopRunning.set(false)
         NativeBridge.stop()
