@@ -144,10 +144,13 @@ Android：
 
 ```bash
 cargo install cargo-ndk
-cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs \
-    build --release -p synctus-mobile
-cd android && ./gradlew assembleRelease
+./scripts/build-android-libs.sh          # 或 scripts\build-android-libs.ps1
+cd android && gradle assembleRelease
 ```
+
+> 仓库里**没有** Gradle Wrapper（`gradlew` / `gradle-wrapper.jar`）：
+> 二进制文件既是审查盲区也是供应链风险。请自行安装 Gradle 8.11+，
+> CI 中由 `gradle/actions/setup-gradle` 固定版本安装。
 
 ## 项目结构
 
