@@ -33,14 +33,50 @@
 
 需要一台双方都能访问的机器。服务器**不持有任何密钥**，只是转发密文。
 
+**一键安装**（自动识别架构与 systemd/OpenRC，静态二进制无需任何依赖）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/LANqed/Synctus/main/deploy/install.sh | sudo sh
+```
+
+装完直接运行 **`synctus`** 进入管理菜单：
+
+```
+  Synctus 中继服务器 0.1.0
+  状态 ● 运行中　管理方式 systemd　开机自启 已开启
+
+  1) 查看状态与在线设备
+  2) 查看日志
+  3) 停止服务
+  4) 重启服务
+  5) 关闭开机自启
+  6) 修改配置
+  7) 检查配置
+  8) 显示客户端连接信息
+  0) 退出
+
+  请输入选项数字:
+```
+
+「修改配置」是问答式的：回车保留当前值，不用学 TOML。脚本化部署也可以用
+`synctus status / start / stop / restart / logs / config / check`。
+
+安装脚本做了什么，每一步都打印出来：下载静态二进制 → 校验 SHA-256 →
+创建无登录 shell 的服务账号 → 安装 systemd 或 OpenRC 服务 → 开机自启 → 启动。
+重跑就是升级，会保留已有配置。卸载：`curl …/uninstall.sh | sudo sh`。
+
+也可以不装服务，直接拿 Release 里的服务端产物：
+
+| 场景 | 用哪个 |
+| --- | --- |
+| 任意 Linux（Alpine、容器、老系统） | `synctus-server-<arch>-linux-musl.tar.gz`，静态链接，扔上去就能跑 |
+| Debian / Ubuntu（想用系统 glibc） | `synctus-server-<arch>-linux-gnu.tar.gz` |
+
+`<arch>` 是 `x86_64` 或 `aarch64`。
+
+手动跑：
+
 ```bash
-# 从 Release 下载，或自行编译
-cargo build --release -p synctus-server
-
-# 直接跑（明文，仅限内网测试）
-./synctus-server
-
-# 生产环境：配置 TLS 证书
 ./synctus-server --config server.toml
 ```
 
@@ -53,6 +89,10 @@ SYNCTUS_CERT=/etc/letsencrypt/live/example.com/fullchain.pem \
 SYNCTUS_KEY=/etc/letsencrypt/live/example.com/privkey.pem \
 ./synctus-server
 ```
+
+> **关于 TLS**：不配 TLS 时消息内容仍然是端到端加密的，服务器和中间人都读不到；
+> 但房间标识与设备标识会以明文经过网络。公网部署请配上证书，
+> 或放在 Nginx / Caddy 后面。`synctus` 的「修改配置」可以直接填证书路径。
 
 Docker 与 systemd 单元见 [`deploy/`](deploy/)。
 
@@ -81,9 +121,12 @@ Docker 与 systemd 单元见 [`deploy/`](deploy/)。
 ### 4. 桌面端
 
 ```bash
-./synctus              # 正常启动
-./synctus --minimised  # 隐藏悬浮窗启动（自启用）
+./synctus-desktop      # 正常启动
+./synctus-desktop --minimised  # 隐藏悬浮窗启动（自启用）
 ```
+
+> 为什么不是 `synctus`？`synctus` 是服务器端的管理工具（见上面）。桌面端叫
+> `synctus-desktop`，两者在同一个仓库里、不会互相覆盖。
 
 - 悬浮窗常驻显示两人今日专注进度条与分钟数
 - **左键点对方头像** → 敲一敲；对方摸鱼时会多出「👀 抓到了」按钮
@@ -176,11 +219,11 @@ cd android && gradle assembleRelease
 ```
 crates/
   core/      协议、加密、番茄钟、目标与连续天数、摸鱼检测、可复用客户端引擎
-  server/    中继服务器：房间路由、限速、保留状态
+  server/    中继服务器（daemon + synctus 管理 TUI + 管理套接字）
   desktop/   Windows/Linux 客户端：egui 悬浮窗、托盘、传感器
   mobile/    Android 原生库：JSON 命令/事件桥，逻辑与桌面端共享
 android/     Kotlin + Compose 前端：前台服务、通知栏、设置
-deploy/      server 示例配置、systemd 单元、Dockerfile
+deploy/      install.sh/uninstall.sh 一键安装、示例配置、systemd 单元、Dockerfile
 docs/        协议与加密设计
 ```
 
@@ -209,11 +252,13 @@ git tag v0.2.0 && git push origin v0.2.0
 与所在 Release 不同的版本号，客户端的更新检查会永久提示有新版。
 
 产物：`synctus-windows-x86_64.zip`、`synctus-linux-x86_64.tar.gz`、
-`synctus-android.apk`，附 `SHA256SUMS.txt`。Release 说明里自动列出自上个
-版本以来的提交。
+`synctus-android.apk`，以及四个独立服务端包
+`synctus-server-<arch>-linux-<musl|gnu>.tar.gz`（`<arch>` 为 x86_64 / aarch64），
+附 `SHA256SUMS.txt`。Release 说明里自动列出自上个版本以来的提交。
 
-发布前会核对三件事：Windows/Linux 二进制的 `--version`、APK manifest 里的
-`versionName`、以及产物是否真的存在（缺任何一个就失败，而不是发一个空 Release）。
+发布前会核对：Windows/Linux 二进制的 `--version`、APK manifest 里的
+`versionName`、服务端 musl 包是否真的是静态链接、以及产物是否真的存在
+（缺任何一个就失败，而不是发一个空 Release）。
 
 APK 签名是可选的：配置了下面这些 secrets 才签名，否则产出
 `synctus-android-unsigned.apk` 并在 Release 说明里注明。

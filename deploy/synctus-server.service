@@ -4,19 +4,28 @@ Documentation=https://github.com/LANqed/Synctus
 After=network-online.target
 Wants=network-online.target
 
+# Reference copy of the unit. `deploy/install.sh` writes an equivalent one with
+# the paths it actually used, so this file is for anyone installing by hand or
+# reviewing what the installer will do.
+
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/synctus-server --config /etc/synctus/server.toml
 Restart=on-failure
 RestartSec=5s
 
-# The relay holds no persistent state, so it can run as an unprivileged
-# system user with almost nothing available to it.
-DynamicUser=yes
+User=synctus
+Group=synctus
+
+# The admin socket `synctus` connects to. systemd creates it on start and removes
+# it on stop, so a killed process cannot leave a stale socket behind.
+RuntimeDirectory=synctus
+RuntimeDirectoryMode=0750
+
 # Needed only when binding a port below 1024; the default 8787 does not need it.
 # AmbientCapabilities=CAP_NET_BIND_SERVICE
 
-# Reading the TLS certificate, when one is configured.
+# Reading the config and, when configured, the TLS certificate.
 ReadOnlyPaths=/etc/synctus /etc/letsencrypt
 
 NoNewPrivileges=yes
@@ -27,7 +36,8 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX is required for the admin socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes

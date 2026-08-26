@@ -40,11 +40,16 @@ where
             // of a bare disconnect.
             let _ = proto::write_frame(&mut writer, &Frame::error("auth", format!("{e:#}"))).await;
             tracing::debug!(%peer, error = %format!("{e:#}"), "握手失败");
+            // Counted so `synctus` can show it: a climbing rejection count is
+            // almost always a mismatched invite code, and that is the first thing
+            // to check when pairing does not work.
+            hub.note_rejected();
             return Ok(());
         }
         Err(_) => {
             let _ = proto::write_frame(&mut writer, &Frame::error("timeout", "握手超时")).await;
             tracing::debug!(%peer, "握手超时");
+            hub.note_rejected();
             return Ok(());
         }
     };

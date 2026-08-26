@@ -1,32 +1,30 @@
-//! Synctus relay server.
+//! The Synctus relay daemon.
 //!
-//! A small C/S relay: it authenticates devices into a room derived from the
-//! users' shared invite code, then forwards opaque, end-to-end encrypted frames
-//! between them. It cannot read any status, to-do or nudge content.
+//! Authenticates devices into a room derived from the users' shared invite code,
+//! then forwards opaque, end-to-end encrypted frames between them. It cannot read
+//! any status, to-do or nudge content.
 //!
-//! Run it on any VPS:
+//! Normally managed through the `synctus` tool rather than run by hand:
 //!
 //! ```text
-//! synctus-server --config server.toml
+//! synctus-server --config /etc/synctus/server.toml
 //! SYNCTUS_BIND=0.0.0.0:8787 synctus-server
 //! ```
-
-mod config;
-mod conn;
-mod hub;
-mod limiter;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-use config::ServerConfig;
-use hub::Hub;
+use synctus_server::admin;
+use synctus_server::config::ServerConfig;
+use synctus_server::conn;
+use synctus_server::hub::Hub;
 
 fn main() -> Result<()> {
-    // A single-threaded runtime is enough: the relay is I/O bound and each
-    // connection does almost no work. It also keeps memory low on a small VPS.
+    // Two worker threads: the relay is I/O bound and each connection does almost
+    // no work, so this keeps memory low on a small VPS while leaving one thread
+    // spare for a blocking DNS lookup.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -49,8 +47,18 @@ async fn run() -> Result<()> {
         None => ServerConfig::default(),
     };
     cfg.apply_env();
-    let cfg = Arc::new(cfg);
 
+    // Refuse to start on a config that cannot work, rather than starting and
+    // misbehaving in a way the operator has to diagnose from logs.
+    let problems = cfg.problems();
+    if !problems.is_empty() {
+        for p in &problems {
+            tracing::error!("配置问题: {p}");
+        }
+        anyhow::bail!("配置有 {} 处问题，已拒绝启动", problems.len());
+    }
+
+    let cfg = Arc::new(cfg);
     let hub = Hub::new(cfg.max_devices_per_room, cfg.max_rooms);
 
     let listener = TcpListener::bind(&cfg.bind)
@@ -71,9 +79,28 @@ async fn run() -> Result<()> {
     tracing::info!(
         bind = %cfg.bind,
         tls = tls.is_some(),
-        version = env!("CARGO_PKG_VERSION"),
+        version = synctus_server::version(),
         "Synctus 中继服务器已启动"
     );
+
+    // The admin socket, so `synctus` can report live state. Failure is not fatal:
+    // the relay's job is to relay, and a missing socket only degrades the status
+    // display.
+    #[cfg(unix)]
+    {
+        let socket = args
+            .admin_socket
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(admin::DEFAULT_SOCKET));
+        match spawn_admin(socket.clone(), hub.clone(), cfg.clone()).await {
+            Ok(()) => tracing::info!(socket = %socket.display(), "管理套接字已就绪"),
+            Err(e) => tracing::warn!(
+                socket = %socket.display(),
+                error = %format!("{e:#}"),
+                "管理套接字创建失败，`synctus` 将无法显示实时状态"
+            ),
+        }
+    }
 
     // Periodic stats, at a cadence that is useful without spamming the journal.
     {
@@ -84,7 +111,13 @@ async fn run() -> Result<()> {
             loop {
                 tick.tick().await;
                 let s = hub.stats().await;
-                tracing::info!(rooms = s.rooms, devices = s.devices, "当前状态");
+                tracing::info!(
+                    rooms = s.rooms,
+                    devices = s.devices,
+                    accepted = s.accepted,
+                    rejected = s.rejected,
+                    "当前状态"
+                );
             }
         });
     }
@@ -134,6 +167,94 @@ async fn run() -> Result<()> {
             }
         }
     }
+}
+
+/// Serve the admin socket in the background.
+///
+/// One connection at a time, one line per request: the only client is a local
+/// management tool asking for a status page, so concurrency here would be
+/// complexity without a purpose.
+#[cfg(unix)]
+async fn spawn_admin(path: PathBuf, hub: Arc<Hub>, cfg: Arc<ServerConfig>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("创建运行目录失败: {}", dir.display()))?;
+    }
+    // A leftover socket from a killed process would make bind fail.
+    let _ = std::fs::remove_file(&path);
+
+    let listener = UnixListener::bind(&path)
+        .with_context(|| format!("绑定管理套接字失败: {}", path.display()))?;
+
+    // 0660: the service user and its group. Filesystem permissions are the whole
+    // authorisation model, so this is the security boundary — world-writable here
+    // would let any local user read who is connected.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660))
+        .with_context(|| format!("设置套接字权限失败: {}", path.display()))?;
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!(error = %e, "管理套接字接受失败");
+                    continue;
+                }
+            };
+
+            let hub = hub.clone();
+            let cfg = cfg.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let response = match serde_json::from_str::<admin::Request>(&line) {
+                        Ok(admin::Request::Status) => {
+                            let s = hub.stats().await;
+                            admin::Response::Status(admin::Status {
+                                version: synctus_server::version().to_string(),
+                                uptime_secs: hub.uptime_secs(),
+                                bind: cfg.bind.clone(),
+                                tls: cfg.tls_enabled(),
+                                rooms: s.rooms,
+                                devices: s.devices,
+                                accepted: s.accepted,
+                                rejected: s.rejected,
+                            })
+                        }
+                        Ok(admin::Request::Rooms) => admin::Response::Rooms {
+                            rooms: hub.room_info().await,
+                        },
+                        Err(e) => admin::Response::Error {
+                            message: format!("无法解析请求: {e}"),
+                        },
+                    };
+
+                    let mut body = match serde_json::to_vec(&response) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "序列化管理响应失败");
+                            return;
+                        }
+                    };
+                    body.push(b'\n');
+                    if write.write_all(&body).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    Ok(())
 }
 
 fn init_tracing() {
@@ -200,12 +321,17 @@ async fn shutdown_signal() {
 
 struct Args {
     config: Option<PathBuf>,
+    /// Overrides the admin socket path. Only meaningful on Unix, where the socket
+    /// exists at all.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    admin_socket: Option<PathBuf>,
     help: bool,
 }
 
 impl Args {
     fn parse() -> Result<Self> {
         let mut config = None;
+        let mut admin_socket = None;
         let mut help = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -213,15 +339,24 @@ impl Args {
                 "-c" | "--config" => {
                     config = Some(PathBuf::from(args.next().context("--config 缺少路径参数")?));
                 }
+                "--admin-socket" => {
+                    admin_socket = Some(PathBuf::from(
+                        args.next().context("--admin-socket 缺少路径参数")?,
+                    ));
+                }
                 "-h" | "--help" => help = true,
                 "-V" | "--version" => {
-                    println!("synctus-server {}", env!("CARGO_PKG_VERSION"));
+                    println!("synctus-server {}", synctus_server::version());
                     std::process::exit(0);
                 }
                 other => anyhow::bail!("未知参数: {other}"),
             }
         }
-        Ok(Self { config, help })
+        Ok(Self {
+            config,
+            admin_socket,
+            help,
+        })
     }
 }
 
@@ -233,9 +368,10 @@ fn print_help() {
   synctus-server [选项]
 
 选项:
-  -c, --config <路径>   TOML 配置文件
-  -h, --help            显示本帮助
-  -V, --version         显示版本
+  -c, --config <路径>      TOML 配置文件
+      --admin-socket <路径> 管理套接字，默认 {}
+  -h, --help               显示本帮助
+  -V, --version            显示版本
 
 环境变量（覆盖配置文件）:
   SYNCTUS_BIND          监听地址，默认 0.0.0.0:8787
@@ -246,7 +382,9 @@ fn print_help() {
   SYNCTUS_IDLE_TIMEOUT  空闲超时秒数
   SYNCTUS_LOG           日志过滤，如 synctus_server=debug
 
+日常管理请直接运行 `synctus`。
 服务器只转发密文，无法读取任何状态内容。",
-        env!("CARGO_PKG_VERSION")
+        synctus_server::version(),
+        admin::DEFAULT_SOCKET,
     );
 }

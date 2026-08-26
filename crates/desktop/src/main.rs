@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if args.version {
-        println!("synctus {}", env!("CARGO_PKG_VERSION"));
+        println!("synctus-desktop {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -341,7 +341,7 @@ fn print_help() {
         "Synctus 桌面端 {}
 
 用法:
-  synctus [选项]
+  synctus-desktop [选项]
 
 选项:
   -m, --minimised   启动时隐藏悬浮窗（开机自启使用）

@@ -30,7 +30,9 @@
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 
 use synctus_core::proto::{Frame, Presence, Relay};
@@ -52,6 +54,8 @@ struct Room {
     /// Latest retained payload per slot (`status`, `todos`), replayed to
     /// joiners so a device that starts later sees the peer immediately.
     retained: HashMap<String, Relay>,
+    /// Last time anything happened in this room, for the admin view.
+    last_active: Instant,
 }
 
 impl Room {
@@ -61,6 +65,7 @@ impl Room {
             expected_mac: None,
             devices: HashMap::new(),
             retained: HashMap::new(),
+            last_active: Instant::now(),
         }
     }
 }
@@ -76,6 +81,11 @@ pub struct Joined {
 pub struct Stats {
     pub rooms: usize,
     pub devices: usize,
+    /// Connections that completed the handshake since start.
+    pub accepted: u64,
+    /// Connections rejected during the handshake. Mostly a mismatched invite
+    /// code, which is the first thing to check when pairing does not work.
+    pub rejected: u64,
 }
 
 /// Shared state for all connections.
@@ -83,6 +93,11 @@ pub struct Hub {
     rooms: Mutex<HashMap<String, Room>>,
     max_devices_per_room: usize,
     max_rooms: usize,
+    /// Counters for the admin socket. Relaxed ordering: these are for a human
+    /// reading a status page, not for any decision the server makes.
+    accepted: AtomicU64,
+    rejected: AtomicU64,
+    started: Instant,
 }
 
 impl Hub {
@@ -91,7 +106,20 @@ impl Hub {
             rooms: Mutex::new(HashMap::new()),
             max_devices_per_room: max_devices_per_room.max(2),
             max_rooms: max_rooms.max(1),
+            accepted: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+            started: Instant::now(),
         })
+    }
+
+    /// Seconds since the hub was created, i.e. daemon uptime.
+    pub fn uptime_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Record a connection that failed to authenticate.
+    pub fn note_rejected(&self) {
+        self.rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Challenge for `room_id`, creating the room if needed.
@@ -147,6 +175,7 @@ impl Hub {
         // Reconnect of the same device id replaces the old entry; dropping the
         // old sender ends its writer task.
         room.devices.insert(device_id.to_string(), Device { tx });
+        room.last_active = Instant::now();
 
         // Announce the arrival to everyone else.
         let announce = Frame::Presence(Presence {
@@ -155,6 +184,8 @@ impl Hub {
             platform_hint: None,
         });
         Self::fan_out(room, device_id, &announce);
+
+        self.accepted.fetch_add(1, Ordering::Relaxed);
 
         Ok(Joined {
             peers,
@@ -195,6 +226,7 @@ impl Hub {
         };
 
         relay.from = from.to_string();
+        room.last_active = Instant::now();
 
         if let Some(slot) = relay.retain.clone() {
             // Key by device *and* slot: two devices of the same person must not
@@ -233,7 +265,32 @@ impl Hub {
         Stats {
             rooms: rooms.len(),
             devices: rooms.values().map(|r| r.devices.len()).sum(),
+            accepted: self.accepted.load(Ordering::Relaxed),
+            rejected: self.rejected.load(Ordering::Relaxed),
         }
+    }
+
+    /// Per-room detail for the admin socket.
+    ///
+    /// Room ids are truncated to 8 characters: the operator needs to answer "is my
+    /// peer connected", not to obtain a list of which rooms exist on the server.
+    pub async fn room_info(&self) -> Vec<crate::admin::RoomInfo> {
+        let rooms = self.rooms.lock().await;
+        let mut out: Vec<crate::admin::RoomInfo> = rooms
+            .iter()
+            .map(|(id, room)| {
+                let mut devices: Vec<String> = room.devices.keys().cloned().collect();
+                // Stable order so the display does not shuffle between refreshes.
+                devices.sort();
+                crate::admin::RoomInfo {
+                    room: id.chars().take(8).collect(),
+                    devices,
+                    idle_secs: room.last_active.elapsed().as_secs(),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.room.cmp(&b.room));
+        out
     }
 }
 
@@ -423,5 +480,45 @@ mod tests {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
+    }
+
+    #[tokio::test]
+    async fn counters_track_accepted_and_rejected() {
+        let hub = Hub::new(8, 100);
+        hub.challenge_for("room").await.unwrap();
+        let _a = hub.join("room", "a", b"mac").await.unwrap();
+        let _b = hub.join("room", "b", b"mac").await.unwrap();
+        assert!(hub.join("room", "c", b"wrong").await.is_err());
+        // The hub does not know a failed join reached it as a rejection; the
+        // connection handler reports that, so it is counted explicitly.
+        hub.note_rejected();
+
+        let stats = hub.stats().await;
+        assert_eq!(stats.accepted, 2);
+        assert_eq!(stats.rejected, 1);
+    }
+
+    #[tokio::test]
+    async fn room_info_truncates_ids_and_sorts_devices() {
+        let hub = Hub::new(8, 100);
+        let room_id = "0123456789abcdef0123456789abcdef";
+        hub.challenge_for(room_id).await.unwrap();
+        let _b = hub.join(room_id, "zeta", b"mac").await.unwrap();
+        let _a = hub.join(room_id, "alpha", b"mac").await.unwrap();
+
+        let info = hub.room_info().await;
+        assert_eq!(info.len(), 1);
+        assert_eq!(
+            info[0].room, "01234567",
+            "the full room id must not be exposed"
+        );
+        assert_eq!(info[0].devices, vec!["alpha", "zeta"]);
+    }
+
+    #[tokio::test]
+    async fn uptime_is_available_immediately() {
+        let hub = Hub::new(8, 100);
+        // Just has to not panic or overflow on a fresh hub.
+        assert!(hub.uptime_secs() < 5);
     }
 }

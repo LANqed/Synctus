@@ -6,9 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 description = "Synctus relay server: routes end-to-end encrypted status between paired devices"
 
+[lib]
+name = "synctus_server"
+path = "src/lib.rs"
+
+# The daemon. Kept as a separate binary from the management tool so a systemd
+# unit points at something that only ever runs the relay.
 [[bin]]
 name = "synctus-server"
-path = "src/main.rs"
+path = "src/bin/daemon.rs"
+
+# The management tool. This is what a user types.
+[[bin]]
+name = "synctus"
+path = "src/bin/synctus.rs"
 
 [dependencies]
 synctus-core = { workspace = true, default-features = false }
@@ -17,7 +28,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-tokio = { workspace = true, features = ["signal", "fs"] }
+tokio = { workspace = true, features = ["signal", "fs", "io-std"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
@@ -32,3 +43,4 @@ rustls-pki-types.workspace = true
 # so it needs the client half of `core` too.
 synctus-core = { workspace = true, features = ["tls"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+serde_json.workspace = true

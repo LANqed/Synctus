@@ -136,6 +136,101 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Publishing $tag" >> "$GITHUB_STEP_SUMMARY"
 
+  # ------------------------------------------------------------ server
+  # Standalone server packages for VPS deployment. Two flavours:
+  #
+  #   musl  — statically linked, runs on anything including Alpine and container
+  #           base images. The installer's default.
+  #   gnu   — linked against the system glibc. Built with cross, whose images
+  #           pin an old glibc, so the binary also runs on older Debian/Ubuntu.
+  #
+  # Each in x86_64 and aarch64. `cross` is used for all four so one mechanism
+  # handles the aarch64-musl target that has no cross-gcc in apt.
+  server:
+    name: Server ${{ matrix.label }}
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64-musl
+            target: x86_64-unknown-linux-musl
+            asset: synctus-server-x86_64-linux-musl.tar.gz
+          - label: aarch64-musl
+            target: aarch64-unknown-linux-musl
+            asset: synctus-server-aarch64-linux-musl.tar.gz
+          - label: x86_64-gnu
+            target: x86_64-unknown-linux-gnu
+            asset: synctus-server-x86_64-linux-gnu.tar.gz
+          - label: aarch64-gnu
+            target: aarch64-unknown-linux-gnu
+            asset: synctus-server-aarch64-linux-gnu.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-server-${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }} -p synctus-server
+
+      - name: Verify the built version
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/synctus-server"
+          test -x "$bin"
+          actual=$("$bin" --version | awk '{print $2}')
+          expected='${{ needs.version.outputs.version }}'
+          echo "binary reports $actual, release is $expected"
+          test "$actual" = "$expected"
+
+      - name: Confirm it is statically linked (musl only)
+        if: contains(matrix.target, 'musl')
+        run: |
+          set -e
+          bin="target/${{ matrix.target }}/release/synctus-server"
+          if command -v file >/dev/null 2>&1; then
+            file "$bin"
+          fi
+          if command -v ldd >/dev/null 2>&1; then
+            if ldd "$bin" 2>&1 | grep -q 'not a dynamic executable'; then
+              echo "statically linked: OK"
+            else
+              echo "::error::musl binary is not static:"
+              ldd "$bin" || true
+              exit 1
+            fi
+          fi
+
+      - name: Package
+        run: |
+          dir="synctus-server"
+          mkdir -p "$dir"
+          cp "target/${{ matrix.target }}/release/synctus-server" "$dir/"
+          cp "target/${{ matrix.target }}/release/synctus" "$dir/" 2>/dev/null || true
+          cp deploy/install.sh deploy/uninstall.sh "$dir/"
+          cp deploy/server.example.toml "$dir/server.toml.example"
+          tar -czf "${{ matrix.asset }}" "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
   # ------------------------------------------------------------------ desktop
   desktop:
     name: ${{ matrix.label }}
@@ -213,7 +308,7 @@ jobs:
         run: |
           $dir = "dist/synctus"
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/synctus.exe" $dir
+          Copy-Item "target/${{ matrix.target }}/release/synctus-desktop.exe" $dir
           Copy-Item "target/${{ matrix.target }}/release/synctus-server.exe" $dir
           Copy-Item "README.md" $dir
           Copy-Item "docs/PROTOCOL.md" $dir
@@ -225,8 +320,11 @@ jobs:
         run: |
           dir=dist/synctus
           mkdir -p "$dir"
-          cp "target/${{ matrix.target }}/release/synctus" "$dir/"
+          cp "target/${{ matrix.target }}/release/synctus-desktop" "$dir/"
           cp "target/${{ matrix.target }}/release/synctus-server" "$dir/"
+          # The server management TUI, so a desktop Linux install gets the whole
+          # stack. (On Windows the TUI is useless, so only the Linux package has it.)
+          cp "target/${{ matrix.target }}/release/synctus" "$dir/" 2>/dev/null || true
           cp README.md docs/PROTOCOL.md deploy/server.example.toml "$dir/"
           cp deploy/synctus.service deploy/synctus-server.service "$dir/"
           tar -czf "${{ matrix.archive }}" -C dist synctus
@@ -346,7 +444,7 @@ jobs:
   # ------------------------------------------------------------------ publish
   publish:
     name: Publish release
-    needs: [version, desktop, android]
+    needs: [version, server, desktop, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -417,9 +515,20 @@ jobs:
             | Linux | `synctus-linux-x86_64.tar.gz` |
             | Android | `synctus-android.apk` |
 
-            压缩包内同时包含中继服务器 `synctus-server` 与示例配置。
+            **服务端**（部署到 VPS）：
 
-            ${{ steps.signing.outputs.note }}
+            | 用途 | 文件 |
+            | --- | --- |
+            | 任意 Linux（含 Alpine/容器） | `synctus-server-x86_64-linux-musl.tar.gz`（ARM 用 aarch64 版） |
+            | Debian/Ubuntu 动态链接 | `synctus-server-x86_64-linux-gnu.tar.gz`（ARM 用 aarch64 版） |
+
+            **服务端一键安装**：
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/LANqed/Synctus/main/deploy/install.sh | sudo sh
+            ```
+
+            安装后运行 `synctus` 进入管理菜单。桌面端压缩包同时包含客户端与中继服务器。
 
             ## 首次使用
 

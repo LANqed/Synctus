@@ -7,7 +7,10 @@ license.workspace = true
 description = "Synctus desktop client: floating status overlay, tray, pomodoro and to-dos"
 
 [[bin]]
-name = "synctus"
+# `synctus-desktop`, not `synctus`: the latter is the server management tool.
+# Two binaries with the same name in one workspace would silently clobber each
+# other in the release output directory.
+name = "synctus-desktop"
 path = "src/main.rs"
 
 [dependencies]

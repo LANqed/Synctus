@@ -97,6 +97,35 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      # The point of the Artifacts tab is to hand someone a build to try without
+      # running cargo themselves. Test jobs alone produced nothing to download,
+      # which is why the Artifacts tab only ever had the Android files.
+      - name: Build release binaries
+        run: |
+          cargo build --release -p synctus-desktop
+          cargo build --release -p synctus-server
+
+      - name: Upload desktop artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: synctus-linux-debug-artifacts
+          path: |
+            target/release/synctus-desktop
+            target/release/synctus-server
+            target/release/synctus
+          retention-days: 7
+
+      - name: Upload desktop artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: synctus-windows-debug-artifacts
+          path: |
+            target/release/synctus-desktop.exe
+            target/release/synctus-server.exe
+          retention-days: 7
+
   android-native:
     name: Android native library
     runs-on: ubuntu-latest

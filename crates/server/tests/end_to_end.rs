@@ -62,6 +62,69 @@ fn spawn_relay(port: u16) -> Child {
         .expect("start synctus-server")
 }
 
+/// The `synctus` management tool talking to the daemon over the admin socket.
+///
+/// This is the one integration path that a headless dev box would otherwise never
+/// exercise: the TUI and the daemon are separate processes and both could compile
+/// while disagreeing about the socket protocol. They must not.
+#[cfg(unix)]
+#[test]
+fn the_management_tool_reads_real_status_over_the_admin_socket() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let port = free_port();
+    let socket = std::env::temp_dir().join(format!("synctus-admin-{port}.sock"));
+
+    let child = ProcCommand::new(env!("CARGO_BIN_EXE_synctus-server"))
+        .env("SYNCTUS_BIND", format!("127.0.0.1:{port}"))
+        .env("SYNCTUS_LOG", "synctus_server=warn")
+        // A fixed path is required so the test can connect; envs must use the
+        // real Windows-style assignment even on Unix for the `--admin-socket`
+        // arg, which the daemon accepts directly.
+        .arg("--admin-socket")
+        .arg(&socket)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start daemon");
+
+    // Wait for the socket to appear rather than guessing at startup timing.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(socket.exists(), "admin socket never appeared");
+
+    // Connect exactly as `synctus` does: one JSON line in, one out.
+    let mut stream = UnixStream::connect(&socket).expect("connect to admin socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(b"{\"cmd\":\"status\"}\n").unwrap();
+    stream.flush().unwrap();
+
+    let mut reader = BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let response: synctus_server::admin::Response =
+        serde_json::from_str(&line).expect("daemon answered with JSON");
+
+    match response {
+        synctus_server::admin::Response::Status(status) => {
+            assert_eq!(status.version, synctus_server::version());
+            assert_eq!(status.bind, format!("127.0.0.1:{port}"));
+            // Fresh daemon: nothing connected yet.
+            assert_eq!(status.devices, 0);
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&socket);
+}
+
 /// Poll the port until a TCP connection succeeds.
 ///
 /// Probing the socket rather than parsing the log output: it does not depend on
