@@ -43,6 +43,12 @@ const DEVICE_QUEUE: usize = 64;
 
 struct Device {
     tx: mpsc::Sender<Frame>,
+    /// User nickname this device belongs to, from the handshake.
+    user: String,
+    /// Device display name, from the handshake.
+    name: String,
+    /// When the device connected, for the admin view.
+    connected_at: Instant,
 }
 
 struct Room {
@@ -93,6 +99,10 @@ pub struct Hub {
     rooms: Mutex<HashMap<String, Room>>,
     max_devices_per_room: usize,
     max_rooms: usize,
+    /// Relay listen address, reported in the admin snapshot.
+    bind: String,
+    /// Whether TLS is enabled, reported in the admin snapshot.
+    tls: bool,
     /// Counters for the admin socket. Relaxed ordering: these are for a human
     /// reading a status page, not for any decision the server makes.
     accepted: AtomicU64,
@@ -101,11 +111,18 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn new(max_devices_per_room: usize, max_rooms: usize) -> Arc<Self> {
+    pub fn new(
+        max_devices_per_room: usize,
+        max_rooms: usize,
+        bind: impl Into<String>,
+        tls: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             rooms: Mutex::new(HashMap::new()),
             max_devices_per_room: max_devices_per_room.max(2),
             max_rooms: max_rooms.max(1),
+            bind: bind.into(),
+            tls,
             accepted: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
             started: Instant::now(),
@@ -139,7 +156,18 @@ impl Hub {
     }
 
     /// Verify the MAC and register the device.
-    pub async fn join(&self, room_id: &str, device_id: &str, mac: &[u8]) -> Result<Joined> {
+    ///
+    /// `user` and `name` come from the unauthenticated handshake, so they are
+    /// treated as self-reported display metadata for the admin view — never for
+    /// authorisation.
+    pub async fn join(
+        &self,
+        room_id: &str,
+        device_id: &str,
+        mac: &[u8],
+        user: String,
+        name: String,
+    ) -> Result<Joined> {
         let mut rooms = self.rooms.lock().await;
         let room = match rooms.get_mut(room_id) {
             Some(r) => r,
@@ -174,7 +202,15 @@ impl Hub {
 
         // Reconnect of the same device id replaces the old entry; dropping the
         // old sender ends its writer task.
-        room.devices.insert(device_id.to_string(), Device { tx });
+        room.devices.insert(
+            device_id.to_string(),
+            Device {
+                tx,
+                user,
+                name,
+                connected_at: Instant::now(),
+            },
+        );
         room.last_active = Instant::now();
 
         // Announce the arrival to everyone else.
@@ -278,20 +314,106 @@ impl Hub {
         let rooms = self.rooms.lock().await;
         let mut out: Vec<crate::admin::RoomInfo> = rooms
             .iter()
-            .map(|(id, room)| {
-                let mut devices: Vec<String> = room.devices.keys().cloned().collect();
-                // Stable order so the display does not shuffle between refreshes.
-                devices.sort();
-                crate::admin::RoomInfo {
-                    room: id.chars().take(8).collect(),
-                    devices,
-                    idle_secs: room.last_active.elapsed().as_secs(),
-                }
+            .map(|(id, room)| crate::admin::RoomInfo {
+                room: id.chars().take(8).collect(),
+                devices: room_devices(room),
+                idle_secs: room.last_active.elapsed().as_secs(),
             })
             .collect();
         out.sort_by(|a, b| a.room.cmp(&b.room));
         out
     }
+
+    /// Devices grouped by their user nickname, plus the aggregate counters — the
+    /// one structure the WebUI needs.
+    pub async fn snapshot(&self) -> crate::admin::Snapshot {
+        let rooms = self.rooms.lock().await;
+
+        let mut users: std::collections::BTreeMap<String, Vec<crate::admin::DeviceInfo>> =
+            std::collections::BTreeMap::new();
+        for room in rooms.values() {
+            for (id, device) in &room.devices {
+                users
+                    .entry(device.user.clone())
+                    .or_default()
+                    .push(crate::admin::DeviceInfo {
+                        id: id.clone(),
+                        name: device.name.clone(),
+                        user: device.user.clone(),
+                        connected_secs: device.connected_at.elapsed().as_secs(),
+                    });
+            }
+        }
+
+        let user_groups = users
+            .into_iter()
+            .map(|(user, mut devices)| {
+                // Stable order so the page does not shuffle between refreshes.
+                devices.sort_by(|a, b| a.id.cmp(&b.id));
+                crate::admin::UserGroup { user, devices }
+            })
+            .collect();
+
+        let room_list = rooms
+            .iter()
+            .map(|(id, room)| crate::admin::RoomInfo {
+                room: id.chars().take(8).collect(),
+                devices: room_devices(room),
+                idle_secs: room.last_active.elapsed().as_secs(),
+            })
+            .collect();
+
+        let mut device_total = 0usize;
+        for room in rooms.values() {
+            device_total += room.devices.len();
+        }
+
+        crate::admin::Snapshot {
+            status: crate::admin::Status {
+                version: crate::version().to_string(),
+                uptime_secs: self.uptime_secs(),
+                bind: self.bind.clone(),
+                tls: self.tls,
+                rooms: rooms.len(),
+                devices: device_total,
+                accepted: self.accepted.load(Ordering::Relaxed),
+                rejected: self.rejected.load(Ordering::Relaxed),
+            },
+            users: user_groups,
+            rooms: room_list,
+        }
+    }
+
+    /// Drop a device wherever it is connected, ending its connection.
+    ///
+    /// Used by the WebUI's "disconnect" action. Returns whether the device was
+    /// found at all.
+    pub async fn kick(&self, device_id: &str) -> bool {
+        let mut rooms = self.rooms.lock().await;
+        for room in rooms.values_mut() {
+            if room.devices.remove(device_id).is_some() {
+                room.last_active = Instant::now();
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The devices in a room, sorted by id for a stable display.
+fn room_devices(room: &Room) -> Vec<crate::admin::DeviceInfo> {
+    let mut out: Vec<crate::admin::DeviceInfo> = room
+        .devices
+        .iter()
+        .map(|(id, device)| crate::admin::DeviceInfo {
+            id: id.clone(),
+            name: device.name.clone(),
+            user: device.user.clone(),
+            connected_secs: device.connected_at.elapsed().as_secs(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
 }
 
 /// Constant-time byte comparison, so a wrong MAC leaks no timing information.
@@ -320,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_room_gets_one_stable_challenge() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         let a = hub.challenge_for("room").await.unwrap();
         let b = hub.challenge_for("room").await.unwrap();
         assert_eq!(a, b);
@@ -330,26 +452,40 @@ mod tests {
 
     #[tokio::test]
     async fn first_device_sets_the_expected_mac() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        assert!(hub.join("room", "a", b"mac-one").await.is_ok());
-        assert!(hub.join("room", "b", b"mac-one").await.is_ok());
+        assert!(hub
+            .join("room", "a", b"mac-one", "".into(), "".into())
+            .await
+            .is_ok());
+        assert!(hub
+            .join("room", "b", b"mac-one", "".into(), "".into())
+            .await
+            .is_ok());
         assert!(
-            hub.join("room", "c", b"mac-two").await.is_err(),
+            hub.join("room", "c", b"mac-two", "".into(), "".into())
+                .await
+                .is_err(),
             "a different MAC must be rejected"
         );
     }
 
     #[tokio::test]
     async fn joiner_sees_existing_peers_and_retained_state() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         hub.relay("room", "a", relay("a", Some("status")))
             .await
             .unwrap();
 
-        let joined = hub.join("room", "b", b"mac").await.unwrap();
+        let joined = hub
+            .join("room", "b", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         assert_eq!(joined.peers, vec!["a".to_string()]);
         assert_eq!(joined.retained.len(), 1);
         assert_eq!(joined.retained[0].from, "a");
@@ -357,24 +493,36 @@ mod tests {
 
     #[tokio::test]
     async fn own_retained_state_is_not_echoed_back() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         hub.relay("room", "a", relay("a", Some("status")))
             .await
             .unwrap();
 
         // Same device reconnecting.
-        let again = hub.join("room", "a", b"mac").await.unwrap();
+        let again = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         assert!(again.retained.is_empty());
     }
 
     #[tokio::test]
     async fn relay_reaches_the_peer_but_not_the_sender() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let mut a = hub.join("room", "a", b"mac").await.unwrap();
-        let mut b = hub.join("room", "b", b"mac").await.unwrap();
+        let mut a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let mut b = hub
+            .join("room", "b", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
 
         // `a` was told that `b` arrived.
         assert!(
@@ -391,10 +539,16 @@ mod tests {
 
     #[tokio::test]
     async fn sender_identity_is_overwritten_by_the_connection() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
-        let mut b = hub.join("room", "b", b"mac").await.unwrap();
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let mut b = hub
+            .join("room", "b", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         let _ = b.rx.try_recv();
 
         // `a` lies about who it is; the hub must correct it.
@@ -406,10 +560,16 @@ mod tests {
 
     #[tokio::test]
     async fn leaving_notifies_and_empty_rooms_are_dropped() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
-        let mut b = hub.join("room", "b", b"mac").await.unwrap();
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let mut b = hub
+            .join("room", "b", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         let _ = b.rx.try_recv();
 
         hub.leave("room", "a").await;
@@ -422,9 +582,12 @@ mod tests {
 
     #[tokio::test]
     async fn challenge_rotates_after_the_room_empties() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         let first = hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         hub.leave("room", "a").await;
 
         let second = hub.challenge_for("room").await.unwrap();
@@ -433,11 +596,20 @@ mod tests {
 
     #[tokio::test]
     async fn device_and_room_limits_are_enforced() {
-        let hub = Hub::new(2, 1);
+        let hub = Hub::new(2, 1, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
-        let _b = hub.join("room", "b", b"mac").await.unwrap();
-        assert!(hub.join("room", "c", b"mac").await.is_err());
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let _b = hub
+            .join("room", "b", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        assert!(hub
+            .join("room", "c", b"mac", "".into(), "".into())
+            .await
+            .is_err());
 
         // max_rooms = 1, and the one room is occupied.
         assert!(hub.challenge_for("another").await.is_err());
@@ -445,10 +617,16 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_replaces_the_previous_connection() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let old = hub.join("room", "a", b"mac").await.unwrap();
-        let _new = hub.join("room", "a", b"mac").await.unwrap();
+        let old = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let _new = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         // Old queue is orphaned, so its writer task ends.
         drop(old);
         assert_eq!(hub.stats().await.devices, 1);
@@ -456,10 +634,16 @@ mod tests {
 
     #[tokio::test]
     async fn two_devices_retain_separate_status_slots() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
-        let _b = hub.join("room", "b", b"mac").await.unwrap();
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let _b = hub
+            .join("room", "b", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         hub.relay("room", "a", relay("a", Some("status")))
             .await
             .unwrap();
@@ -467,7 +651,10 @@ mod tests {
             .await
             .unwrap();
 
-        let c = hub.join("room", "c", b"mac").await.unwrap();
+        let c = hub
+            .join("room", "c", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
         assert_eq!(
             c.retained.len(),
             2,
@@ -484,11 +671,20 @@ mod tests {
 
     #[tokio::test]
     async fn counters_track_accepted_and_rejected() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         hub.challenge_for("room").await.unwrap();
-        let _a = hub.join("room", "a", b"mac").await.unwrap();
-        let _b = hub.join("room", "b", b"mac").await.unwrap();
-        assert!(hub.join("room", "c", b"wrong").await.is_err());
+        let _a = hub
+            .join("room", "a", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let _b = hub
+            .join("room", "b", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        assert!(hub
+            .join("room", "c", b"wrong", "".into(), "".into())
+            .await
+            .is_err());
         // The hub does not know a failed join reached it as a rejection; the
         // connection handler reports that, so it is counted explicitly.
         hub.note_rejected();
@@ -500,11 +696,17 @@ mod tests {
 
     #[tokio::test]
     async fn room_info_truncates_ids_and_sorts_devices() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         let room_id = "0123456789abcdef0123456789abcdef";
         hub.challenge_for(room_id).await.unwrap();
-        let _b = hub.join(room_id, "zeta", b"mac").await.unwrap();
-        let _a = hub.join(room_id, "alpha", b"mac").await.unwrap();
+        let _b = hub
+            .join(room_id, "zeta", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
+        let _a = hub
+            .join(room_id, "alpha", b"mac", "".into(), "".into())
+            .await
+            .unwrap();
 
         let info = hub.room_info().await;
         assert_eq!(info.len(), 1);
@@ -512,13 +714,87 @@ mod tests {
             info[0].room, "01234567",
             "the full room id must not be exposed"
         );
-        assert_eq!(info[0].devices, vec!["alpha", "zeta"]);
+        let ids: Vec<&str> = info[0].devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "zeta"]);
     }
 
     #[tokio::test]
     async fn uptime_is_available_immediately() {
-        let hub = Hub::new(8, 100);
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
         // Just has to not panic or overflow on a fresh hub.
         assert!(hub.uptime_secs() < 5);
+    }
+
+    #[tokio::test]
+    async fn snapshot_groups_devices_by_user() {
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", true);
+        let room = "0123456789abcdef0123456789abcdef";
+        hub.challenge_for(room).await.unwrap();
+        let _a = hub
+            .join(room, "abc", b"mac", "A".into(), "Alice 的电脑".into())
+            .await
+            .unwrap();
+        let _b = hub
+            .join(room, "def", b"mac", "B".into(), "Bob 的手机".into())
+            .await
+            .unwrap();
+        let _c = hub
+            .join(room, "ghi", b"mac", "A".into(), "Alice 的手机".into())
+            .await
+            .unwrap();
+
+        let snap = hub.snapshot().await;
+
+        assert!(snap.status.tls);
+        assert_eq!(snap.status.rooms, 1);
+        assert_eq!(snap.status.devices, 3);
+
+        // Grouped by user, sorted by user name (empty sorts first).
+        assert_eq!(snap.users.len(), 2, "A and B, no empty group");
+        let a = snap.users.iter().find(|u| u.user == "A").unwrap();
+        let ids: Vec<&str> = a.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["abc", "ghi"],
+            "both of A's devices group together"
+        );
+        assert!(a.devices.iter().any(|d| d.name == "Alice 的电脑"));
+    }
+
+    #[tokio::test]
+    async fn kick_disconnects_a_device_anywhere() {
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
+        let room = "0123456789abcdef0123456789abcdef";
+        hub.challenge_for(room).await.unwrap();
+        let _a = hub
+            .join(room, "abc", b"mac", "A".into(), "".into())
+            .await
+            .unwrap();
+
+        assert!(hub.kick("abc").await);
+        // Second kick finds nothing.
+        assert!(!hub.kick("abc").await);
+        assert_eq!(hub.stats().await.devices, 0);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_updates_the_user_label() {
+        let hub = Hub::new(8, 100, "0.0.0.0:8787", false);
+        let room = "0123456789abcdef0123456789abcdef";
+        hub.challenge_for(room).await.unwrap();
+        let _first = hub
+            .join(room, "abc", b"mac", "A".into(), "".into())
+            .await
+            .unwrap();
+        // The same device reconnects after its owner changed the nickname.
+        let _second = hub
+            .join(room, "abc", b"mac", "B".into(), "".into())
+            .await
+            .unwrap();
+
+        let snap = hub.snapshot().await;
+        assert_eq!(snap.status.devices, 1, "reconnect must not double-count");
+        let b = snap.users.iter().find(|u| u.user == "B").unwrap();
+        assert_eq!(b.devices.len(), 1);
     }
 }

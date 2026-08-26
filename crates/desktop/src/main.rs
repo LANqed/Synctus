@@ -19,6 +19,7 @@ mod autostart;
 mod notify;
 mod paths;
 mod sensors;
+mod theme;
 mod tray;
 mod ui;
 
@@ -51,7 +52,8 @@ fn main() -> Result<()> {
         .with_min_inner_size([200.0, 72.0])
         .with_decorations(false)
         .with_transparent(true)
-        .with_resizable(false)
+        // Resizable so the to-do list and the context menu are never clipped.
+        .with_resizable(true)
         .with_taskbar(false)
         .with_title("Synctus");
 
@@ -80,6 +82,7 @@ fn main() -> Result<()> {
         options,
         Box::new(|cc| {
             install_fonts(&cc.egui_ctx);
+            theme::install(&cc.egui_ctx);
             Ok(Box::new(Desktop::new(app, start_hidden)))
         }),
     )
@@ -96,6 +99,10 @@ struct Desktop {
     tray_failed: bool,
     /// Whether the overlay window is currently visible.
     overlay_visible: bool,
+    /// Set when the user asked to quit. The close-requested handler treats a
+    /// window close as "hide to tray" — but not when this flag is set, otherwise
+    /// the tray's 退出 button would cancel its own close.
+    quitting: bool,
     /// Last label pushed to the tray, to avoid redundant updates.
     last_tray_label: String,
     /// Last accountability values pushed to the tray. Updating a menu item on
@@ -111,6 +118,7 @@ impl Desktop {
             tray: None,
             tray_failed: false,
             overlay_visible: !start_hidden,
+            quitting: false,
             last_tray_label: String::new(),
             // Deliberately not the real initial values, so the first sync always
             // pushes something.
@@ -228,12 +236,20 @@ impl eframe::App for Desktop {
                 });
         }
 
-        if self.app.show_settings && ui::settings(&ctx, &mut self.app, &mut self.ui) {
-            self.app.show_settings = false;
+        if self.app.show_settings {
+            // The settings live in their own native window, not inside the
+            // overlay: the overlay is small and anything larger gets clipped
+            // ("显示不完全"). A separate viewport is a real OS window.
+            ui::settings_viewport(&ctx, &mut self.app, &mut self.ui);
         }
 
         for request in requests {
             if self.handle(&ctx, request) {
+                // Explicit quit: stop rendering the settings window and close the
+                // root viewport. The close-requested handler below must NOT cancel
+                // this, or the tray 退出 button does nothing.
+                self.quitting = true;
+                self.app.show_settings = false;
                 self.app.shutdown();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
@@ -244,7 +260,7 @@ impl eframe::App for Desktop {
 
         // Closing the overlay window hides it instead of quitting: the tray keeps
         // the app running, which is the whole point of a status widget.
-        if ctx.input(|i| i.viewport().close_requested()) && self.tray.is_some() {
+        if ctx.input(|i| i.viewport().close_requested()) && self.tray.is_some() && !self.quitting {
             self.overlay_visible = false;
             self.app.cfg.show_overlay = false;
             self.app.save_config();

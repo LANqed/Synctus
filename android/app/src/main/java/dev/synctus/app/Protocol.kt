@@ -91,6 +91,8 @@ sealed interface BridgeEvent {
     @SerialName("peer")
     data class Peer(
         val name: String,
+        /** User nickname this device belongs to; empty when unassigned. */
+        val user: String = "",
         val platform: String,
         val presence: String,
         @SerialName("presence_color") val presenceColor: Long,
@@ -293,6 +295,14 @@ data class ClientConfig(
     @SerialName("invite_code") val inviteCode: String = "",
     @SerialName("device_id") val deviceId: String = "",
     @SerialName("device_name") val deviceName: String = "Android",
+    /**
+     * User nickname this device belongs to.
+     *
+     * The nickname is the grouping key: every device carrying the same value is
+     * shown under one user in the server's admin view, and the peer's UI prefixes
+     * it to the device name.
+     */
+    val user: String = "",
     val privacy: Privacy = Privacy(),
     val pomodoro: PomodoroConfig = PomodoroConfig(),
     val accountability: Accountability = Accountability(),

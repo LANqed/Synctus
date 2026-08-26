@@ -30,6 +30,8 @@ pub enum Request {
     Status,
     /// One line per connected device, for the "who is connected" view.
     Rooms,
+    /// Everything at once, for the WebUI.
+    Snapshot,
 }
 
 /// What the daemon answers.
@@ -40,6 +42,7 @@ pub enum Response {
     Rooms {
         rooms: Vec<RoomInfo>,
     },
+    Snapshot(Snapshot),
     /// The request could not be served.
     Error {
         message: String,
@@ -61,18 +64,55 @@ pub struct Status {
     pub rejected: u64,
 }
 
+/// A connected device, as the admin view knows it.
+///
+/// `user` and `name` are self-reported by the client in the handshake. They are
+/// display metadata for grouping, never authorisation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// User nickname this device belongs to; empty when unassigned.
+    #[serde(default)]
+    pub user: String,
+    /// Seconds since the device connected.
+    pub connected_secs: u64,
+}
+
 /// A room, described without revealing anything the relay should not know.
 ///
-/// The room id is truncated: logging or displaying it in full would record which
-/// rooms exist on this server, and the operator does not need that to answer
-/// "is my peer connected".
+/// The room id is truncated: displaying it in full would record which rooms exist
+/// on this server, and the operator does not need that to answer "is my peer
+/// connected".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomInfo {
     /// First 8 hex characters of the room id.
     pub room: String,
-    pub devices: Vec<String>,
+    pub devices: Vec<DeviceInfo>,
     /// Seconds since the room's most recent activity.
     pub idle_secs: u64,
+}
+
+/// One user, with every device that claims that nickname.
+///
+/// Devices with no user label are grouped under `user == ""`, shown as 未分组.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserGroup {
+    /// The nickname; empty means unassigned devices.
+    pub user: String,
+    pub devices: Vec<DeviceInfo>,
+}
+
+/// Everything the WebUI and the management tool show about live state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    #[serde(flatten)]
+    pub status: Status,
+    /// Devices grouped by user nickname, for the "who owns which device" view.
+    pub users: Vec<UserGroup>,
+    /// The rooms themselves.
+    pub rooms: Vec<RoomInfo>,
 }
 
 impl Status {

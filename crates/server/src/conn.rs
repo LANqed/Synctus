@@ -121,7 +121,15 @@ where
         bail!("认证响应长度错误");
     }
 
-    let joined = hub.join(&hello.room, &hello.device_id, &mac).await?;
+    let joined = hub
+        .join(
+            &hello.room,
+            &hello.device_id,
+            &mac,
+            hello.user.clone(),
+            hello.device_name.clone(),
+        )
+        .await?;
 
     proto::write_frame(
         writer,
@@ -262,7 +270,7 @@ mod tests {
         let mut client = client;
         proto::write_frame(
             &mut client,
-            &Frame::hello(keys.room_id_hex(), device.to_string()),
+            &Frame::hello(keys.room_id_hex(), device.to_string(), "".into(), "".into()),
         )
         .await?;
 
@@ -286,7 +294,10 @@ mod tests {
     }
 
     fn setup() -> (Arc<Hub>, Arc<ServerConfig>) {
-        (Hub::new(8, 100), Arc::new(ServerConfig::default()))
+        (
+            Hub::new(8, 100, "0.0.0.0:8787", false),
+            Arc::new(ServerConfig::default()),
+        )
     }
 
     // Argon2id is slow; one derivation per test is enough.
@@ -317,7 +328,7 @@ mod tests {
         tokio::spawn(serve(server, "test".into(), hub, cfg));
         proto::write_frame(
             &mut client,
-            &Frame::hello(good.room_id_hex(), "attacker".into()),
+            &Frame::hello(good.room_id_hex(), "attacker".into(), "".into(), "".into()),
         )
         .await
         .unwrap();
@@ -434,6 +445,8 @@ mod tests {
                 room: "0".repeat(32),
                 device_id: "dev".into(),
                 version: "test".into(),
+                user: "".into(),
+                device_name: "".into(),
             }),
         )
         .await
@@ -451,9 +464,12 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(4096);
         tokio::spawn(serve(server, "test".into(), hub, cfg));
 
-        proto::write_frame(&mut client, &Frame::hello("not-hex".into(), "dev".into()))
-            .await
-            .unwrap();
+        proto::write_frame(
+            &mut client,
+            &Frame::hello("not-hex".into(), "dev".into(), "".into(), "".into()),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             proto::read_frame(&mut client).await.unwrap(),
             Some(Frame::Error(_))
@@ -518,9 +534,12 @@ mod tests {
         let (hub, cfg) = setup();
         let k = keys("ABCD-EFGH-IJKL-MNOP");
         let (mut a, _) = connect_client(hub, cfg, &k, "dev-a").await.unwrap();
-        proto::write_frame(&mut a, &Frame::hello(k.room_id_hex(), "dev-a".into()))
-            .await
-            .unwrap();
+        proto::write_frame(
+            &mut a,
+            &Frame::hello(k.room_id_hex(), "dev-a".into(), "".into(), "".into()),
+        )
+        .await
+        .unwrap();
 
         let Some(Frame::Error(e)) = proto::read_frame(&mut a).await.unwrap() else {
             panic!("expected protocol error");

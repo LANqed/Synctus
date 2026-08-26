@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synctus 管理面板</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #12151b; color: #e8eaed;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h1::before { content: "◆ "; color: #39e6e5; }
+  .sub { color: #9aa0a6; font-size: 13px; margin-bottom: 20px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: #1c2027; border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: #9aa0a6; font-size: 12px; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .card .value.ok { color: #4caf50; }
+  .card .value.warn { color: #ffb300; }
+  h2 { font-size: 15px; margin: 20px 0 10px; }
+  .user { background: #1c2027; border-radius: 10px; padding: 12px 16px; margin-bottom: 10px; }
+  .user .head { font-weight: 600; margin-bottom: 6px; }
+  .user .head .count { color: #9aa0a6; font-weight: 400; font-size: 12px; margin-left: 8px; }
+  .device { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-top: 1px solid #262b33; font-size: 13px; }
+  .device:first-of-type { border-top: none; }
+  .device .name { }
+  .device .meta { color: #9aa0a6; font-size: 12px; }
+  .kick { background: transparent; color: #ef5350; border: 1px solid #ef5350; border-radius: 6px; padding: 2px 10px; cursor: pointer; font-size: 12px; }
+  .kick:hover { background: #ef5350; color: #fff; }
+  .empty { color: #9aa0a6; font-size: 13px; }
+  table.rooms { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.rooms th, table.rooms td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #262b33; }
+  table.rooms th { color: #9aa0a6; font-weight: 400; }
+  #err { color: #ef5350; font-size: 13px; margin-bottom: 12px; display: none; }
+</style>
+</head>
+<body>
+  <h1>Synctus 管理面板</h1>
+  <div class="sub" id="version"></div>
+  <div id="err"></div>
+
+  <div class="cards" id="cards"></div>
+
+  <h2>用户与设备</h2>
+  <div id="users"></div>
+
+  <h2>房间</h2>
+  <table class="rooms">
+    <thead><tr><th>房间</th><th>设备</th><th>归属用户</th><th>已连接</th><th>空闲</th></tr></thead>
+    <tbody id="rooms"></tbody>
+  </table>
+
+<script>
+const POLL_MS = 3000;
+let authHeader = null;
+
+function showErr(text) {
+  const el = document.getElementById('err');
+  el.textContent = text;
+  el.style.display = text ? 'block' : 'none';
+}
+
+// Fetch with a cached Basic header. On a 401 the browser prompt supplies the
+// password once, and we remember it for the automatic polls.
+async function api(path, opts) {
+  const headers = opts && opts.headers ? opts.headers : {};
+  if (authHeader) headers['Authorization'] = authHeader;
+  const res = await fetch(path, { ...opts, headers });
+  if (res.status === 401) {
+    authHeader = 'Basic ' + btoa('admin:' + prompt('请输入管理员密码'));
+    return api(path, opts);
+  }
+  return res;
+}
+
+function uptime(secs) {
+  if (secs < 60) return secs + ' 秒';
+  if (secs < 3600) return Math.floor(secs / 60) + ' 分';
+  if (secs < 86400) return Math.floor(secs / 3600) + ' 小时 ' + Math.floor((secs % 3600) / 60) + ' 分';
+  return Math.floor(secs / 86400) + ' 天 ' + Math.floor((secs % 86400) / 3600) + ' 小时';
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function deviceName(d) { return d.name ? esc(d.name) : '<code>' + esc(d.id) + '</code>'; }
+
+function renderStatus(s) {
+  document.getElementById('version').textContent =
+    'Synctus ' + esc(s.version) + '　监听 ' + esc(s.bind) + (s.tls ? '　TLS 已启用' : '　TLS 未启用');
+  const cards = [
+    ['运行时长', uptime(s.uptime_secs), ''],
+    ['房间 / 设备', s.rooms + ' / ' + s.devices, ''],
+    ['已接受连接', s.accepted, ''],
+    ['已拒绝连接', s.rejected, s.rejected > 0 ? 'warn' : ''],
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c =>
+    `<div class="card"><div class="label">${c[0]}</div><div class="value ${c[2]}">${c[1]}</div></div>`
+  ).join('');
+}
+
+function renderUsers(s) {
+  const users = s.users || [];
+  const el = document.getElementById('users');
+  if (users.length === 0) { el.innerHTML = '<div class="empty">暂无设备连接。</div>'; return; }
+  el.innerHTML = users.map(u => {
+    const label = u.user ? esc(u.user) : '未分组';
+    return `<div class="user"><div class="head">${label}<span class="count">${u.devices.length} 台设备</span></div>` +
+      u.devices.map(d => `
+        <div class="device">
+          <span class="name">${deviceName(d)}</span>
+          <span class="meta">已连接 ${uptime(d.connected_secs)}</span>
+          <button class="kick" data-device="${esc(d.id)}">断开</button>
+        </div>`).join('') +
+      `</div>`;
+  }).join('');
+}
+
+function renderRooms(s) {
+  const rows = (s.rooms || []).map(r => {
+    const devs = (r.devices || []).map(d =>
+      `${deviceName(d)}<span style="color:#9aa0a6">${d.user ? '（' + esc(d.user) + '）' : ''}</span>`).join('、');
+    return `<tr><td>${esc(r.room)}</td><td>${devs || '—'}</td><td></td><td></td><td>${r.idle_secs}s</td></tr>`;
+  }).join('');
+  document.getElementById('rooms').innerHTML = rows || '<tr><td colspan="5">暂无房间。</td></tr>';
+}
+
+async function refresh() {
+  try {
+    const res = await api('/api/status');
+    if (!res.ok) { showErr('无法读取状态：' + res.status); return; }
+    showErr('');
+    const s = await res.json();
+    renderStatus(s.status);
+    renderUsers(s);
+    renderRooms(s);
+  } catch (e) {
+    showErr('请求失败：' + e.message);
+  }
+}
+
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.kick');
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    await api('/api/kick', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device: btn.dataset.device }),
+    });
+  } finally {
+    setTimeout(refresh, 600);
+  }
+});
+
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>

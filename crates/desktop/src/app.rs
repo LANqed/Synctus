@@ -436,6 +436,7 @@ impl App {
     fn build_snapshot(&self) -> StatusSnapshot {
         let privacy = &self.cfg.privacy;
         let mut snap = StatusSnapshot::new(&self.cfg.device_id, &self.cfg.device_name);
+        snap.user = self.cfg.user.clone();
         snap.presence = self.effective_presence();
 
         if privacy.share_foreground_app {
@@ -870,7 +871,8 @@ impl App {
 /// Compare two snapshots ignoring the timestamp, so an unchanged status is not
 /// republished every poll.
 fn snapshot_eq(a: &StatusSnapshot, b: &StatusSnapshot) -> bool {
-    a.presence == b.presence
+    a.user == b.user
+        && a.presence == b.presence
         && a.foreground == b.foreground
         && a.battery == b.battery
         && a.music == b.music

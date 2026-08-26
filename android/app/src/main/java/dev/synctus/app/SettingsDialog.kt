@@ -119,6 +119,18 @@ fun SettingsDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                OutlinedTextField(
+                    value = draft.user,
+                    onValueChange = { draft = draft.copy(user = it) },
+                    label = { Text("用户标识（例如 A）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "标识是分组依据：所有填同一个标识的设备会被归到同一个用户下，服务器管理面板按它分组。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 SliderRow(
                     label = "采样间隔",
                     value = draft.pollSecs.toFloat(),

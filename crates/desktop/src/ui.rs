@@ -16,9 +16,10 @@ use synctus_core::model::{NudgeKind, PomodoroPhase, Presence};
 
 use crate::app::{App, UiRequest};
 
-/// Overlay size. Wide enough for `Artist - Title` at the default font size, tall
-/// enough for the focus comparison row.
-pub const OVERLAY_SIZE: [f32; 2] = [280.0, 124.0];
+/// Overlay size. Wide enough for the status lines and the focus comparison, and
+/// tall enough for the to-do list when it is expanded. The window is resizable,
+/// so this is the default, not a ceiling.
+pub const OVERLAY_SIZE: [f32; 2] = [300.0, 236.0];
 /// Settings window size.
 pub const SETTINGS_SIZE: [f32; 2] = [520.0, 600.0];
 
@@ -64,11 +65,15 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
                 ui.add_space(6.0);
 
                 ui.vertical(|ui| {
-                    // Line 1: name, presence, and the nag button when earned.
+                    // Line 1: name (with its user label), presence, and the nag
+                    // button when earned.
                     ui.horizontal(|ui| {
                         let name = app
                             .peer()
-                            .map(|p| p.name.clone())
+                            .map(|p| match p.user.as_str() {
+                                "" => p.name.clone(),
+                                user => format!("{user} · {}", p.name),
+                            })
                             .unwrap_or_else(|| "等待对方…".to_string());
                         ui.label(egui::RichText::new(name).strong());
 
@@ -129,6 +134,11 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
                 );
             }
 
+            // The to-do list, shown when the user asks for it.
+            if state.show_todos {
+                overlay_todos(ui, app);
+            }
+
             // Recent poke, shown briefly.
             if let Some((nudge, at)) = &app.last_nudge {
                 if at.elapsed().as_secs() < 8 {
@@ -136,7 +146,7 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
                     ui.label(
                         egui::RichText::new(nudge.body())
                             .small()
-                            .color(egui::Color32::from_rgb(0x42, 0xa5, 0xf5)),
+                            .color(crate::theme::ACCENT),
                     );
                     // Keep repainting so the message disappears on time.
                     ui.ctx()
@@ -193,7 +203,7 @@ fn focus_row(ui: &mut egui::Ui, app: &App) {
                 .fill(if done {
                     egui::Color32::from_rgb(0x4c, 0xaf, 0x50)
                 } else {
-                    egui::Color32::from_rgb(0x42, 0xa5, 0xf5)
+                    crate::theme::ACCENT
                 }),
         )
         .on_hover_text(format!("我：{mine}/{goal} 分钟"));
@@ -287,7 +297,7 @@ fn avatar(ui: &mut egui::Ui, app: &App, presence: Presence) -> Option<UiRequest>
             let total = 25.0 * 60_000.0;
             let fraction = (left / total).clamp(0.0, 1.0);
             let ring = if pom.phase.is_break() {
-                egui::Color32::from_rgb(0x42, 0xa5, 0xf5)
+                crate::theme::ACCENT
             } else {
                 egui::Color32::from_rgb(0xef, 0x53, 0x50)
             };
@@ -312,7 +322,12 @@ fn avatar(ui: &mut egui::Ui, app: &App, presence: Presence) -> Option<UiRequest>
         .then_some(UiRequest::Nudge(NudgeKind::Knock))
 }
 
-/// The shared context menu, used by the overlay and mirrored by the tray.
+/// The overlay's context menu.
+///
+/// Kept deliberately short: it renders inside the small always-on-top overlay,
+/// and a long menu gets clipped by the window bounds ("显示不完全"). Everything
+/// heavier — updates, reconnect, the full nudge list — lives in the tray menu and
+/// in the separate settings window.
 pub fn menu(ui: &mut egui::Ui, app: &App, state: &mut UiState) -> Option<UiRequest> {
     let mut request = None;
 
@@ -322,7 +337,7 @@ pub fn menu(ui: &mut egui::Ui, app: &App, state: &mut UiState) -> Option<UiReque
             .weak(),
     );
 
-    // Today's numbers at the top of the menu: it is the first thing worth seeing.
+    // Today's numbers at the top: the first thing worth seeing.
     let goal = app.cfg.accountability.daily_goal_min;
     if goal > 0 {
         let (mine, theirs) = app.focus_comparison();
@@ -335,49 +350,34 @@ pub fn menu(ui: &mut egui::Ui, app: &App, state: &mut UiState) -> Option<UiReque
     }
     ui.separator();
 
-    // The two accountability actions are promoted out of the submenu: burying the
-    // nag behind two clicks is how it stops being used.
-    let nag_hint = if app.peer_is_slacking() {
-        "对方正在专注，却开着摸鱼应用"
-    } else if app.peer_is_focusing() {
-        "对方正在专注中"
-    } else {
-        "对方现在并没有在专注，催了也没意义"
-    };
-    if ui
-        .add_enabled(
-            app.peer_is_focusing(),
-            egui::Button::new(format!(
-                "{} {}",
-                NudgeKind::Nag.emoji(),
-                NudgeKind::Nag.label()
-            )),
-        )
-        .on_hover_text(nag_hint)
-        .on_disabled_hover_text(nag_hint)
-        .clicked()
-    {
-        request = Some(UiRequest::Nudge(NudgeKind::Nag));
-        ui.close();
-    }
+    // Interaction, as a single submenu so it costs one line.
+    ui.menu_button("互动", |ui| {
+        let nag_hint = if app.peer_is_slacking() {
+            "对方正在专注，却开着摸鱼应用"
+        } else if app.peer_is_focusing() {
+            "对方正在专注中"
+        } else {
+            "对方现在并没有在专注，催了也没意义"
+        };
+        if ui
+            .add_enabled(
+                app.peer_is_focusing(),
+                egui::Button::new(format!(
+                    "{} {}",
+                    NudgeKind::Nag.emoji(),
+                    NudgeKind::Nag.label()
+                )),
+            )
+            .on_hover_text(nag_hint)
+            .on_disabled_hover_text(nag_hint)
+            .clicked()
+        {
+            request = Some(UiRequest::Nudge(NudgeKind::Nag));
+            ui.close();
+        }
 
-    if ui
-        .button(format!(
-            "{} {}",
-            NudgeKind::FocusTogether.emoji(),
-            NudgeKind::FocusTogether.label()
-        ))
-        .on_hover_text("对方空闲时会自动跟着开始一轮")
-        .clicked()
-    {
-        request = Some(UiRequest::Nudge(NudgeKind::FocusTogether));
-        ui.close();
-    }
-
-    ui.menu_button("其他互动", |ui| {
         for kind in NudgeKind::ALL {
-            // Already offered above.
-            if matches!(kind, NudgeKind::Nag | NudgeKind::FocusTogether) {
+            if matches!(kind, NudgeKind::Nag) {
                 continue;
             }
             if ui
@@ -409,6 +409,7 @@ pub fn menu(ui: &mut egui::Ui, app: &App, state: &mut UiState) -> Option<UiReque
 
     ui.separator();
 
+    // The pomodoro, right there in the overlay as requested.
     let pom = app.pomodoro.state();
     let label = match pom.phase {
         PomodoroPhase::Idle => "开始专注".to_string(),
@@ -434,31 +435,94 @@ pub fn menu(ui: &mut egui::Ui, app: &App, state: &mut UiState) -> Option<UiReque
         }
     }
 
-    ui.separator();
-
     if ui.checkbox(&mut state.show_todos, "显示待办清单").changed() {
         // Handled by the caller reading `state.show_todos`.
     }
+
+    ui.separator();
     if ui.button("设置…").clicked() {
         request = Some(UiRequest::OpenSettings);
         ui.close();
     }
-    if ui.button("检查更新").clicked() {
-        request = Some(UiRequest::CheckUpdate);
-        ui.close();
-    }
-    if ui.button("重新连接").clicked() {
-        request = Some(UiRequest::Reconnect);
-        ui.close();
-    }
-
-    ui.separator();
     if ui.button("退出").clicked() {
         request = Some(UiRequest::Quit);
         ui.close();
     }
 
     request
+}
+
+/// The to-do list inside the overlay.
+///
+/// Own list, editable inline; the peer's list is read-only below a divider. The
+/// peer's list is already rendered in the settings Todos tab, but the user asked
+/// for it here too.
+fn overlay_todos(ui: &mut egui::Ui, app: &mut App) {
+    ui.separator();
+
+    let mut toggled: Option<String> = None;
+    let mut removed: Option<String> = None;
+    let mut new_title = String::new();
+    let mut add = false;
+
+    // A compact single-line editor.
+    let edit = egui::TextEdit::singleline(&mut new_title)
+        .hint_text("新待办，回车添加")
+        .desired_width(ui.available_width() - 44.0);
+    let response = ui.add(edit);
+    if response.lost_focus()
+        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        && !new_title.trim().is_empty()
+    {
+        add = true;
+    }
+
+    for todo in &app.data.todos {
+        ui.horizontal(|ui| {
+            let mut done = todo.done;
+            if ui.checkbox(&mut done, "").changed() {
+                toggled = Some(todo.id.clone());
+            }
+            let text = if todo.done {
+                egui::RichText::new(&todo.title).strikethrough().weak()
+            } else {
+                egui::RichText::new(&todo.title)
+            };
+            ui.label(text);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("✕").clicked() {
+                    removed = Some(todo.id.clone());
+                }
+            });
+        });
+    }
+
+    // The peer's list, read-only.
+    if let Some(peer) = app.peer() {
+        let items = app.peers.todos(&peer.device_id);
+        if !items.is_empty() {
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!("{} 的待办", peer.name))
+                    .small()
+                    .weak(),
+            );
+            for todo in items.iter().take(12) {
+                let mark = if todo.done { "☑" } else { "☐" };
+                ui.label(egui::RichText::new(format!("{mark} {}", todo.title)).small());
+            }
+        }
+    }
+
+    if add {
+        app.add_todo(&new_title);
+    }
+    if let Some(id) = toggled {
+        app.toggle_todo(&id);
+    }
+    if let Some(id) = removed {
+        app.remove_todo(&id);
+    }
 }
 
 /// One line describing what the peer is doing.
@@ -531,69 +595,101 @@ fn connection_hint(conn: &ConnState) -> String {
     }
 }
 
-/// The settings window. Returns true when it should close.
-pub fn settings(ctx: &egui::Context, app: &mut App, state: &mut UiState) -> bool {
-    // `Window::open` borrows a flag for the whole call, so the close request from
-    // inside the body goes through a separate variable.
-    let mut open = true;
+/// Render the settings in their own native window.
+///
+/// A separate OS viewport rather than a window inside the overlay: the overlay is
+/// a small always-on-top widget, and a full settings page drawn there gets
+/// clipped. This is a real window with its own title and size.
+pub fn settings_viewport(ctx: &egui::Context, app: &mut App, state: &mut UiState) {
+    let viewport_id = egui::ViewportId::from_hash_of("synctus-settings");
+
+    // `show_viewport_immediate` runs the closure now, on the main thread, so it
+    // can borrow the app state directly.
+    ctx.show_viewport_immediate(
+        viewport_id,
+        egui::ViewportBuilder::default()
+            .with_title("Synctus 设置")
+            .with_inner_size(SETTINGS_SIZE)
+            .with_min_inner_size([420.0, 400.0])
+            .with_app_id("synctus-settings"),
+        |ui, _class| {
+            let child_ctx = ui.ctx().clone();
+
+            // The settings content is the same; only the container changed.
+            if settings(ui, app, state) {
+                app.show_settings = false;
+            }
+
+            // The user clicking the window's X button is the same as Cancel.
+            if child_ctx.input(|i| i.viewport().close_requested()) {
+                app.show_settings = false;
+            }
+
+            // Keep it alive while the window is open.
+            child_ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        },
+    );
+}
+
+/// The settings window body. Returns true when it should close.
+pub fn settings(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> bool {
+    // `apply`/`cancel` are set inside the panel and read after it.
     let mut apply = false;
     let mut cancel = false;
 
-    egui::Window::new("Synctus 设置")
-        .open(&mut open)
-        .default_size(SETTINGS_SIZE)
-        .vscroll(false)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (tab, label) in [
-                    (SettingsTab::Connection, "连接"),
-                    (SettingsTab::Accountability, "督促"),
-                    (SettingsTab::Privacy, "隐私"),
-                    (SettingsTab::Pomodoro, "番茄钟"),
-                    (SettingsTab::Todos, "待办"),
-                    (SettingsTab::Log, "日志"),
-                ] {
-                    ui.selectable_value(&mut state.tab, tab, label);
-                }
+    // A CentralPanel, not a Window: the native viewport is already the window, and
+    // nesting a Window here would show two title bars.
+    egui::CentralPanel::default().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            for (tab, label) in [
+                (SettingsTab::Connection, "连接"),
+                (SettingsTab::Accountability, "督促"),
+                (SettingsTab::Privacy, "隐私"),
+                (SettingsTab::Pomodoro, "番茄钟"),
+                (SettingsTab::Todos, "待办"),
+                (SettingsTab::Log, "日志"),
+            ] {
+                ui.selectable_value(&mut state.tab, tab, label);
+            }
+        });
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(440.0)
+            .show(ui, |ui| match state.tab {
+                SettingsTab::Connection => connection_tab(ui, app),
+                SettingsTab::Accountability => accountability_tab(ui, app),
+                SettingsTab::Privacy => privacy_tab(ui, app),
+                SettingsTab::Pomodoro => pomodoro_tab(ui, app),
+                SettingsTab::Todos => todos_tab(ui, app, state),
+                SettingsTab::Log => log_tab(ui, app),
             });
-            ui.separator();
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .max_height(440.0)
-                .show(ui, |ui| match state.tab {
-                    SettingsTab::Connection => connection_tab(ui, app),
-                    SettingsTab::Accountability => accountability_tab(ui, app),
-                    SettingsTab::Privacy => privacy_tab(ui, app),
-                    SettingsTab::Pomodoro => pomodoro_tab(ui, app),
-                    SettingsTab::Todos => todos_tab(ui, app, state),
-                    SettingsTab::Log => log_tab(ui, app),
-                });
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("保存并应用").clicked() {
-                    apply = true;
-                }
-                if ui.button("取消").clicked() {
-                    app.draft = None;
-                    cancel = true;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(connection_hint(&app.conn))
-                            .small()
-                            .weak(),
-                    );
-                });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("保存并应用").clicked() {
+                apply = true;
+            }
+            if ui.button("取消").clicked() {
+                app.draft = None;
+                cancel = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(connection_hint(&app.conn))
+                        .small()
+                        .weak(),
+                );
             });
         });
+    });
 
     if apply {
         app.apply_draft();
         return true;
     }
-    cancel || !open
+    cancel
 }
 
 fn connection_tab(ui: &mut egui::Ui, app: &mut App) {
@@ -647,6 +743,17 @@ fn connection_tab(ui: &mut egui::Ui, app: &mut App) {
         ui.label("显示名称");
         ui.add(egui::TextEdit::singleline(&mut draft.device_name).desired_width(220.0));
     });
+    ui.horizontal(|ui| {
+        ui.label("用户标识");
+        ui.add(egui::TextEdit::singleline(&mut draft.user).desired_width(220.0));
+    });
+    ui.label(
+        egui::RichText::new(
+            "给自己这台设备起一个标识，例如「A」。对方的所有设备如果也填 A，就会被归到同一个用户下；服务器管理面板按这个分组。",
+        )
+        .small()
+        .weak(),
+    );
     ui.horizontal(|ui| {
         ui.label("采样间隔");
         ui.add(egui::Slider::new(&mut draft.poll_secs, 1..=60).suffix(" 秒"));

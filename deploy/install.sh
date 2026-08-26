@@ -252,6 +252,12 @@ rate_limit_burst = 30
 
 # 客户端完成握手的时限。
 handshake_timeout_secs = 10
+
+# WebUI 管理面板：能看到每个用户有哪些设备、哪些在线，并可以断开设备。
+# 填入监听地址与管理员密码即可启用（推荐只监听 127.0.0.1 并通过 SSH 隧道访问，
+# 或放在反向代理后面）。改完运行 \`synctus\` 选择重启。
+# web_bind = "127.0.0.1:9090"
+# web_password = "请设置一个强密码"
 EOF
     chmod 0644 "$CONFIG"
     say "  已生成  $CONFIG"

@@ -93,6 +93,8 @@ pub enum BridgeEvent {
     /// The peer's status, ready to render.
     Peer {
         name: String,
+        /// User nickname this device belongs to; empty when unassigned.
+        user: String,
         platform: String,
         presence: String,
         presence_color: u32,
@@ -376,6 +378,7 @@ impl Bridge {
     fn publish(&mut self) -> Result<()> {
         let privacy = &self.cfg.privacy;
         let mut snap = StatusSnapshot::new(&self.cfg.device_id, &self.cfg.device_name);
+        snap.user = self.cfg.user.clone();
         snap.presence = self.effective_presence();
 
         if privacy.share_foreground_app {
@@ -572,6 +575,7 @@ impl Bridge {
 
         Some(BridgeEvent::Peer {
             name: peer.name.clone(),
+            user: peer.user.clone(),
             platform: format!("{:?}", peer.platform),
             presence: presence.label().to_string(),
             presence_color: argb(presence),

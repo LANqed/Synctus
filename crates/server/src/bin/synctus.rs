@@ -238,6 +238,12 @@ fn print_status() -> Result<()> {
                 }
             );
 
+            // The WebUI address lives in the config file, not the daemon.
+            let cfg = ServerConfig::load(&config_path()).unwrap_or_default();
+            if let Some(bind) = &cfg.web_bind {
+                println!("  Web 面板    http://{bind}");
+            }
+
             match query_rooms() {
                 Ok(rooms) if !rooms.is_empty() => {
                     println!();
@@ -250,7 +256,17 @@ fn print_status() -> Result<()> {
                             room.idle_secs
                         );
                         for d in room.devices {
-                            println!("    - {d}");
+                            let owner = if d.user.is_empty() {
+                                "未分组".to_string()
+                            } else {
+                                d.user.clone()
+                            };
+                            let name = if d.name.is_empty() {
+                                d.id.clone()
+                            } else {
+                                d.name
+                            };
+                            println!("    - [{owner}] {name}　已连接 {} 秒", d.connected_secs);
                         }
                     }
                 }
@@ -349,6 +365,22 @@ fn edit_config() -> Result<()> {
     }
     if let Some(v) = ask_num("每设备每秒转发上限", cfg.rate_limit_per_sec as u64)? {
         cfg.rate_limit_per_sec = v as u32;
+    }
+
+    // The WebUI: a browser dashboard showing users/devices and a disconnect
+    // button. Entering an address turns it on; clearing it turns it off.
+    println!("\nWebUI 管理面板（回车跳过则保持不变）：");
+    let web_bind = cfg.web_bind.clone().unwrap_or_default();
+    if let Some(v) = ask("监听地址（例如 127.0.0.1:9090，留空关闭）", &web_bind)? {
+        cfg.web_bind = Some(v).filter(|s| !s.is_empty());
+    }
+    if cfg.web_bind.is_some() {
+        let web_password = cfg.web_password.clone().unwrap_or_default();
+        if let Some(v) = ask("管理员密码", &web_password)? {
+            cfg.web_password = Some(v).filter(|s| !s.is_empty());
+        }
+    } else {
+        cfg.web_password = None;
     }
 
     // Validate before writing: saving a config the daemon will refuse turns a

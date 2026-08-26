@@ -73,6 +73,14 @@ pub struct Hello {
     /// Client build, for diagnostics only.
     #[serde(default)]
     pub version: String,
+    /// User nickname this device belongs to. Sent in the clear on purpose: the
+    /// relay cannot decrypt status payloads, but the admin view needs to group
+    /// devices by owner. It is a chosen display name, not secret.
+    #[serde(default)]
+    pub user: String,
+    /// Device display name, for the same admin view.
+    #[serde(default)]
+    pub device_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,12 +198,14 @@ impl Frame {
         })
     }
 
-    pub fn hello(room: String, device_id: String) -> Self {
+    pub fn hello(room: String, device_id: String, user: String, device_name: String) -> Self {
         Frame::Hello(Hello {
             proto: PROTOCOL_VERSION,
             room,
             device_id,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            user,
+            device_name,
         })
     }
 }
@@ -272,9 +282,12 @@ mod tests {
     async fn roundtrip_frames_over_a_pipe() {
         let (mut a, mut b) = tokio::io::duplex(4096);
 
-        write_frame(&mut a, &Frame::hello("room1".into(), "dev1".into()))
-            .await
-            .unwrap();
+        write_frame(
+            &mut a,
+            &Frame::hello("room1".into(), "dev1".into(), "A".into(), "电脑".into()),
+        )
+        .await
+        .unwrap();
         write_frame(&mut a, &Frame::Ping).await.unwrap();
 
         let Some(Frame::Hello(h)) = read_frame(&mut b).await.unwrap() else {

@@ -36,6 +36,15 @@ pub struct ServerConfig {
 
     /// Seconds a client has to finish the handshake.
     pub handshake_timeout_secs: u64,
+
+    /// The WebUI listen address, e.g. `127.0.0.1:9090`. `None` disables it.
+    ///
+    /// Reaching the relay from a browser means putting this on a real TCP port,
+    /// so it needs a password; see [`ServerConfig::web_password`].
+    pub web_bind: Option<String>,
+    /// Admin password for the WebUI. Required when [`ServerConfig::web_bind`] is
+    /// set.
+    pub web_password: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -51,6 +60,8 @@ impl Default for ServerConfig {
             rate_limit_per_sec: 10,
             rate_limit_burst: 30,
             handshake_timeout_secs: 10,
+            web_bind: None,
+            web_password: None,
         }
     }
 }
@@ -130,6 +141,18 @@ impl ServerConfig {
                 "# key_path  = \"/etc/letsencrypt/live/example.com/privkey.pem\"".to_string()
             });
 
+        // When disabled the keys are omitted entirely rather than emitted as
+        // comments after `=`, which would not parse as TOML.
+        let web = match (&self.web_bind, &self.web_password) {
+            (Some(bind), Some(password)) => {
+                format!("web_bind = \"{bind}\"\nweb_password = \"{password}\"")
+            }
+            _ => "# WebUI 管理面板：填入监听地址与管理员密码即可启用，例如：\n\
+                 # web_bind = \"127.0.0.1:9090\"\n\
+                 # web_password = \"强密码\""
+                .to_string(),
+        };
+
         format!(
             "# Synctus 中继服务器配置
 #
@@ -168,6 +191,10 @@ rate_limit_burst = {burst}
 
 # 客户端完成握手的时限。
 handshake_timeout_secs = {handshake}
+
+# WebUI 管理面板：能看到每个用户有哪些设备、哪些在线，并可以断开设备。
+# 两个都留空则关闭。
+{web}
 ",
             bind = self.bind,
             cert = cert,
@@ -179,6 +206,7 @@ handshake_timeout_secs = {handshake}
             rate = self.rate_limit_per_sec,
             burst = self.rate_limit_burst,
             handshake = self.handshake_timeout_secs,
+            web = web,
         )
     }
 
@@ -214,6 +242,22 @@ handshake_timeout_secs = {handshake}
                 "突发额度 {} 小于每秒限额 {}，实际速率会低于配置值",
                 self.rate_limit_burst, self.rate_limit_per_sec
             ));
+        }
+
+        // The WebUI opens a TCP port that needs no other client authentication
+        // than this password, so a password is mandatory when it is enabled.
+        if let Some(bind) = &self.web_bind {
+            if bind.parse::<std::net::SocketAddr>().is_err() {
+                out.push(format!(
+                    "WebUI 监听地址 `{bind}` 不是合法的 IP:端口（例如 127.0.0.1:9090）"
+                ));
+            }
+            if self.web_password.as_deref().map_or(true, str::is_empty) {
+                out.push("启用了 WebUI 但未设置管理员密码，拒绝启动".to_string());
+            }
+        }
+        if self.web_password.is_some() && self.web_bind.is_none() {
+            out.push("设置了 WebUI 密码但未设置监听地址，密码不会生效".to_string());
         }
 
         match (&self.cert_path, &self.key_path) {
@@ -359,5 +403,59 @@ mod tests {
         let problems = cfg.problems();
         assert_eq!(problems.len(), 2, "got {problems:?}");
         assert!(problems.iter().all(|p| p.contains("不存在")));
+    }
+
+    #[test]
+    fn web_needs_a_password_when_enabled() {
+        let cfg = ServerConfig {
+            web_bind: Some("127.0.0.1:9090".into()),
+            web_password: None,
+            ..ServerConfig::default()
+        };
+        assert!(cfg.problems().iter().any(|p| p.contains("管理员密码")));
+    }
+
+    #[test]
+    fn a_password_without_a_bind_is_reported() {
+        let cfg = ServerConfig {
+            web_bind: None,
+            web_password: Some("secret".into()),
+            ..ServerConfig::default()
+        };
+        assert!(cfg.problems().iter().any(|p| p.contains("未设置监听地址")));
+    }
+
+    #[test]
+    fn a_fully_configured_web_is_fine() {
+        let cfg = ServerConfig {
+            web_bind: Some("127.0.0.1:9090".into()),
+            web_password: Some("secret".into()),
+            ..ServerConfig::default()
+        };
+        assert!(cfg.problems().is_empty(), "got {:?}", cfg.problems());
+    }
+
+    #[test]
+    fn web_settings_survive_a_render_roundtrip() {
+        let cfg = ServerConfig {
+            web_bind: Some("0.0.0.0:9090".into()),
+            web_password: Some("hunter2".into()),
+            ..ServerConfig::default()
+        };
+        let back: ServerConfig = toml::from_str(&cfg.render()).unwrap();
+        assert_eq!(back.web_bind.as_deref(), Some("0.0.0.0:9090"));
+        assert_eq!(back.web_password.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn disabled_web_renders_as_comments_not_invalid_toml() {
+        // The disabled template must stay parseable — a `key = # comment` line
+        // would be a syntax error the next time the daemon reads it.
+        let cfg = ServerConfig::default();
+        let text = cfg.render();
+        assert!(text.contains("web_bind"));
+        let back: ServerConfig = toml::from_str(&text).unwrap();
+        assert!(back.web_bind.is_none());
+        assert!(back.web_password.is_none());
     }
 }

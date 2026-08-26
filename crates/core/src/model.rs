@@ -245,6 +245,9 @@ pub struct StatusSnapshot {
     pub device_id: String,
     pub name: String,
     pub platform: Platform,
+    /// User nickname this device belongs to. Empty when unassigned.
+    #[serde(default)]
+    pub user: String,
     /// Publisher clock, unix ms. Also used to drop out-of-order updates.
     pub at: i64,
     pub presence: Presence,
@@ -284,6 +287,7 @@ impl StatusSnapshot {
             device_id: device_id.into(),
             name: name.into(),
             platform: Platform::current(),
+            user: String::new(),
             at: crate::now_ms(),
             presence: Presence::Active,
             foreground: None,

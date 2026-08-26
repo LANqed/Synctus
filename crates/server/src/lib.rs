@@ -11,6 +11,7 @@ pub mod conn;
 pub mod hub;
 pub mod limiter;
 pub mod service;
+pub mod web;
 
 /// Version of the running build, used by both binaries and reported over the
 /// admin socket.

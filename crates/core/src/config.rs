@@ -183,6 +183,14 @@ pub struct ClientConfig {
     pub device_id: String,
     /// Name shown to the peer.
     pub device_name: String,
+    /// The user this device belongs to.
+    ///
+    /// A display nickname the owner chooses; it acts as an identifier, so every
+    /// device carrying the same value groups under the same user in the admin
+    /// view. Empty means "unassigned". It is visible to the relay (sent in the
+    /// handshake) so the server can group devices, and also synced to the peer
+    /// so their UI can show who a device belongs to.
+    pub user: String,
 
     pub privacy: Privacy,
     pub pomodoro: PomodoroConfig,
@@ -218,6 +226,7 @@ impl Default for ClientConfig {
             invite_code: String::new(),
             device_id: crate::crypto::random_id(8),
             device_name: default_device_name(),
+            user: String::new(),
             privacy: Privacy::default(),
             pomodoro: PomodoroConfig::default(),
             accountability: Accountability::default(),

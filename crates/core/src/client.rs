@@ -316,7 +316,12 @@ impl Client {
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin,
     {
-        let hello = Frame::hello(self.keys.room_id_hex(), self.cfg.device_id.clone());
+        let hello = Frame::hello(
+            self.keys.room_id_hex(),
+            self.cfg.device_id.clone(),
+            self.cfg.user.clone(),
+            self.cfg.device_name.clone(),
+        );
         proto::write_frame(writer, &hello)
             .await
             .map_err(SessionError::Transport)?;

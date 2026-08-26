@@ -59,7 +59,12 @@ async fn run() -> Result<()> {
     }
 
     let cfg = Arc::new(cfg);
-    let hub = Hub::new(cfg.max_devices_per_room, cfg.max_rooms);
+    let hub = Hub::new(
+        cfg.max_devices_per_room,
+        cfg.max_rooms,
+        cfg.bind.clone(),
+        cfg.tls_enabled(),
+    );
 
     let listener = TcpListener::bind(&cfg.bind)
         .await
@@ -99,6 +104,17 @@ async fn run() -> Result<()> {
                 error = %format!("{e:#}"),
                 "管理套接字创建失败，`synctus` 将无法显示实时状态"
             ),
+        }
+    }
+
+    // The WebUI. Off by default; the config file decides whether it exists at
+    // all, so this only runs when the operator asked for it.
+    if let (Some(bind), Some(password)) = (&cfg.web_bind, &cfg.web_password) {
+        match synctus_server::web::spawn(bind, password, hub.clone()) {
+            Ok(()) => {
+                tracing::info!("Web 管理面板已启用: http://{bind}（用户名任意，密码见配置）");
+            }
+            Err(e) => tracing::error!(error = %format!("{e:#}"), "WebUI 启动失败"),
         }
     }
 
@@ -233,6 +249,9 @@ async fn spawn_admin(path: PathBuf, hub: Arc<Hub>, cfg: Arc<ServerConfig>) -> Re
                         Ok(admin::Request::Rooms) => admin::Response::Rooms {
                             rooms: hub.room_info().await,
                         },
+                        Ok(admin::Request::Snapshot) => {
+                            admin::Response::Snapshot(hub.snapshot().await)
+                        }
                         Err(e) => admin::Response::Error {
                             message: format!("无法解析请求: {e}"),
                         },

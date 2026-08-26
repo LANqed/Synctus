@@ -38,6 +38,10 @@ tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
 rustls-pki-types.workspace = true
 
+# The WebUI. Pure-std HTTP, so it links fine into the static musl build.
+tiny_http = "0.12"
+base64.workspace = true
+
 [dev-dependencies]
 # The end-to-end test drives real client engines against the real server binary,
 # so it needs the client half of `core` too.

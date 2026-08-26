@@ -133,8 +133,14 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun SynctusTheme(content: @Composable () -> Unit) {
-    val colours = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
-    MaterialTheme(colorScheme = colours, content = content)
+    // The brand accent, #39E6E5, as the primary colour in both schemes.
+    val accent = Color(0xFF39E6E5)
+    val scheme = if (isSystemInDarkTheme()) {
+        darkColorScheme(primary = accent, onPrimary = Color(0xFF002020))
+    } else {
+        lightColorScheme(primary = accent, onPrimary = Color(0xFF002020))
+    }
+    MaterialTheme(colorScheme = scheme, content = content)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -303,7 +309,10 @@ private fun PeerCard(state: SyncService.ServiceState) {
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(peer.name, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            if (peer.user.isEmpty()) peer.name else "${peer.user} · ${peer.name}",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
                         Spacer(Modifier.width(8.dp))
                         Text(
                             peer.presence,

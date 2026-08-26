@@ -317,7 +317,7 @@ fn default_icon() -> Result<Icon> {
                 0.0
             };
 
-            let (r, g, b) = (0x42, 0xa5, 0xf5);
+            let [r, g, b, _] = crate::theme::ACCENT.to_array();
             rgba.extend_from_slice(&[r, g, b, (alpha.clamp(0.0, 1.0) * 255.0) as u8]);
         }
     }
