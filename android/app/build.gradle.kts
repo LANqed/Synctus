@@ -5,6 +5,47 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+/**
+ * The release version, read from the workspace `Cargo.toml`.
+ *
+ * One source of truth on purpose. Duplicating the number here is how an APK ends
+ * up claiming a version it is not, and the desktop update check compares the
+ * GitHub tag against the crate version — a drift there means a permanent
+ * "update available" prompt. CI refuses to build when the tag and this disagree.
+ */
+val cargoVersion: String = run {
+    val manifest = rootProject.file("../Cargo.toml")
+    require(manifest.isFile) { "cannot find ${manifest.absolutePath}" }
+
+    // Scoped to [workspace.package] so a dependency's version cannot be picked up
+    // by accident.
+    val section = manifest.readText()
+        .substringAfter("[workspace.package]", "")
+        .substringBefore("\n[")
+    Regex("""^\s*version\s*=\s*"([^"]+)"""", RegexOption.MULTILINE)
+        .find(section)
+        ?.groupValues
+        ?.get(1)
+        ?: error("no version found in [workspace.package] of ${manifest.absolutePath}")
+}
+
+/**
+ * Android requires a monotonically increasing integer. `major * 10000 + minor *
+ * 100 + patch` keeps that true for any version this project will plausibly reach,
+ * and stays readable: 0.2.0 is 200, 1.3.7 is 10307.
+ *
+ * A pre-release suffix is ignored here — `0.2.0-beta.1` and `0.2.0` share a code,
+ * which is correct: installing one over the other should be an upgrade, not a
+ * downgrade.
+ */
+val cargoVersionCode: Int = run {
+    val parts = cargoVersion.substringBefore('-').split('.')
+    val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
+    val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+    val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+    major * 10000 + minor * 100 + patch
+}
+
 android {
     namespace = "dev.synctus.app"
     compileSdk = 35
@@ -13,8 +54,8 @@ android {
         applicationId = "dev.synctus.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = cargoVersionCode
+        versionName = cargoVersion
 
         // Only 64-bit ABIs. 32-bit Android is effectively gone and each extra ABI
         // adds a full copy of the Rust library to the APK.

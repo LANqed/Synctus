@@ -1,13 +1,29 @@
 name: Release
 
+# Publishing is driven by the version in Cargo.toml, and there are two ways in:
+#
+#   1. Push a `v*` tag. The workflow verifies the tag matches Cargo.toml and
+#      builds from it.
+#   2. Run this workflow manually with a version number. It bumps Cargo.toml,
+#      commits, tags and pushes, then builds — one button, no local git needed.
+#
+# Either way the artifacts are attached to a GitHub release, which is also what
+# the in-app update check reads.
+
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to build (e.g. v0.1.0)'
-        required: true
+      version:
+        description: '新版本号（不带 v，例如 0.2.0）。留空则用 Cargo.toml 中的当前版本'
+        required: false
+        type: string
+      prerelease:
+        description: '标记为预发布（客户端的更新检查会忽略预发布）'
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,10 +31,115 @@ env:
 permissions:
   contents: write
 
+concurrency:
+  # Never two releases at once: they would race on the tag and the release body.
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  # ---------------------------------------------------------------- desktop
+  # ------------------------------------------------------------------ version
+  # Resolves the single version every other job builds, and creates the tag when
+  # the run was started manually. Splitting this out means the build jobs never
+  # have to guess, and a mismatch fails in seconds rather than after a 10-minute
+  # compile.
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the release notes can diff against the previous tag.
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve and, if asked, bump the version
+        id: resolve
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          current=$(grep -m1 -A5 '^\[workspace\.package\]' Cargo.toml \
+            | grep -m1 '^version' \
+            | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Cargo.toml version: $current"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag-driven: the tag is authoritative for what to publish, but it
+            # must agree with the manifest or the built binaries would report a
+            # different version than the release they ship in.
+            tag="${GITHUB_REF_NAME}"
+            want="${tag#v}"
+            if [ "$want" != "$current" ]; then
+              echo "::error::标签 $tag 与 Cargo.toml 的 $current 不一致。"
+              echo "::error::请先更新 Cargo.toml 的 [workspace.package] version，或改用手动触发让它自动完成。"
+              exit 1
+            fi
+            version="$current"
+          elif [ -z "$REQUESTED" ]; then
+            # Manual run with no version: publish whatever the manifest says.
+            version="$current"
+            tag="v$version"
+          else
+            version="${REQUESTED#v}"
+            tag="v$version"
+
+            if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::版本号格式应为 x.y.z 或 x.y.z-suffix，收到 $version"
+              exit 1
+            fi
+
+            if [ "$version" != "$current" ]; then
+              echo "Bumping $current -> $version"
+              # Only the [workspace.package] version: a blind sed would also
+              # rewrite dependency versions.
+              perl -0pi -e \
+                's/(\[workspace\.package\][^\[]*?\nversion\s*=\s*")[^"]+(")/${1}'"$version"'${2}/s' \
+                Cargo.toml
+
+              check=$(grep -m1 -A5 '^\[workspace\.package\]' Cargo.toml \
+                | grep -m1 '^version' \
+                | sed -E 's/.*"([^"]+)".*/\1/')
+              if [ "$check" != "$version" ]; then
+                echo "::error::Cargo.toml 未被正确更新（读到 $check）"
+                exit 1
+              fi
+
+              # Keep the lockfile in step, or every later build re-resolves it.
+              cargo update --workspace --offline || cargo update --workspace
+
+              git config user.name 'github-actions[bot]'
+              git config user.email 'github-actions[bot]@users.noreply.github.com'
+              git add Cargo.toml Cargo.lock
+              git commit -m "Release $version"
+              git push origin HEAD:${GITHUB_REF_NAME}
+            fi
+          fi
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            if git rev-parse "$tag" >/dev/null 2>&1; then
+              echo "::error::标签 $tag 已存在。请换一个版本号，或先删除该标签。"
+              exit 1
+            fi
+            git config user.name 'github-actions[bot]'
+            git config user.email 'github-actions[bot]@users.noreply.github.com'
+            git tag -a "$tag" -m "Synctus $version"
+            git push origin "$tag"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag" >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------ desktop
   desktop:
     name: ${{ matrix.label }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -35,6 +156,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The version job may have pushed a bump commit, so build from the tag
+          # rather than whatever the run started at.
+          ref: ${{ needs.version.outputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -67,6 +192,21 @@ jobs:
           cargo build --release --target ${{ matrix.target }} -p synctus-desktop
           cargo build --release --target ${{ matrix.target }} -p synctus-server
 
+      # A binary that reports the wrong version would make the update check nag
+      # forever, so it is confirmed against the release before packaging.
+      - name: Verify the built version
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='${{ needs.version.outputs.version }}'
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            actual=$(./target/${{ matrix.target }}/release/synctus-server.exe --version | awk '{print $2}')
+          else
+            actual=$(./target/${{ matrix.target }}/release/synctus-server --version | awk '{print $2}')
+          fi
+          echo "binary reports $actual, release is $expected"
+          test "$actual" = "$expected"
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -95,10 +235,12 @@ jobs:
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
+          if-no-files-found: error
 
-  # ---------------------------------------------------------------- android
+  # ------------------------------------------------------------------ android
   android:
     name: Android APK
+    needs: version
     runs-on: ubuntu-latest
     env:
       # Lifted to the job so the steps below can test it in an `if:` — the
@@ -106,6 +248,8 @@ jobs:
       KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -150,7 +294,8 @@ jobs:
             build --release -p synctus-mobile
 
       # Signing is optional: without the secrets the APK is unsigned and must be
-      # installed manually, which is fine for a two-person tool.
+      # installed manually, which is fine for a two-person tool. The file name
+      # says which one it is so nobody wonders why the install was refused.
       - name: Decode keystore
         if: env.KEYSTORE_BASE64 != ''
         run: |
@@ -165,26 +310,49 @@ jobs:
           SYNCTUS_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle --no-daemon assembleRelease
 
-      - name: Collect the APK
+      - name: Collect and verify the APK
         run: |
-          set -e
+          set -euo pipefail
           apk=$(find android/app/build/outputs/apk/release -name '*.apk' | head -n1)
-          test -n "$apk" || { echo "no APK produced"; exit 1; }
-          cp "$apk" synctus-android.apk
-          ls -l synctus-android.apk
+          test -n "$apk" || { echo "::error::no APK produced"; exit 1; }
+
+          # The Gradle build reads its version from Cargo.toml; confirm that
+          # actually landed in the manifest.
+          aapt="$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          if [ -x "$aapt" ]; then
+            badging=$("$aapt" dump badging "$apk" | grep -m1 '^package:')
+            echo "$badging"
+            actual=$(echo "$badging" | sed -E "s/.*versionName='([^']+)'.*/\1/")
+            expected='${{ needs.version.outputs.version }}'
+            echo "APK reports $actual, release is $expected"
+            test "$actual" = "$expected"
+          else
+            echo "::warning::aapt2 not found; skipping the APK version check"
+          fi
+
+          if [ "$apk" != "${apk%unsigned.apk}" ]; then
+            cp "$apk" synctus-android-unsigned.apk
+          else
+            cp "$apk" synctus-android.apk
+          fi
+          ls -l synctus-android*.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: synctus-android.apk
-          path: synctus-android.apk
+          name: android-apk
+          path: synctus-android*.apk
+          if-no-files-found: error
 
-  # ---------------------------------------------------------------- publish
+  # ------------------------------------------------------------------ publish
   publish:
     name: Publish release
+    needs: [version, desktop, android]
     runs-on: ubuntu-latest
-    needs: [desktop, android]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -196,14 +364,49 @@ jobs:
 
       - name: Generate checksums
         working-directory: artifacts
-        run: sha256sum * > SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # A short list of what changed, from the commits since the previous tag.
+      # `generate_release_notes` also does this, but writing it into the body
+      # keeps the summary readable when the commit list is long.
+      - name: Collect changes since the previous release
+        id: changes
+        run: |
+          set -euo pipefail
+          tag='${{ needs.version.outputs.tag }}'
+          previous=$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || true)
+
+          {
+            echo 'notes<<CHANGELOG_EOF'
+            if [ -n "$previous" ]; then
+              echo "自 $previous 以来的改动："
+              echo
+              git log --no-merges --pretty='- %s' "$previous..$tag"
+            else
+              echo '首个版本。'
+            fi
+            echo CHANGELOG_EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Note whether the APK is signed
+        id: signing
+        run: |
+          if [ -f artifacts/synctus-android-unsigned.apk ]; then
+            echo 'note=> APK **未签名**，安装时需要允许「未知来源」。要签名的构建，请配置 `ANDROID_KEYSTORE_BASE64` 等 secrets。' >> "$GITHUB_OUTPUT"
+          else
+            echo 'note=' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: Synctus ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: Synctus ${{ needs.version.outputs.version }}
+          prerelease: ${{ inputs.prerelease == true }}
+          fail_on_unmatched_files: true
           files: artifacts/*
           body: |
             ## 安装
@@ -216,10 +419,20 @@ jobs:
 
             压缩包内同时包含中继服务器 `synctus-server` 与示例配置。
 
+            ${{ steps.signing.outputs.note }}
+
             ## 首次使用
 
             1. 在一台有公网地址的机器上运行 `synctus-server`（建议配置 TLS 证书）。
             2. 三端都填入**同一个配对码**与服务器地址。
-            3. 配对码即密钥：服务器只转发密文，无法读取任何状态内容。
+            3. 在设置的「督促」一栏设定每日目标，并按自己的情况改摸鱼应用清单。
+
+            配对码即密钥：服务器只转发密文，无法读取任何状态内容。
+
+            ## 更新
+
+            ${{ steps.changes.outputs.notes }}
+
+            ---
 
             校验文件完整性：`sha256sum -c SHA256SUMS.txt`

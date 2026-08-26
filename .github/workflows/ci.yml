@@ -16,6 +16,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The Android version is derived from Cargo.toml at build time, and the release
+  # workflow refuses to publish when a tag disagrees with it. This catches the
+  # third way they can drift — someone hard-coding a number back into Gradle —
+  # in seconds, rather than at release time.
+  versions:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cargo.toml is the only version source
+        run: |
+          set -euo pipefail
+
+          cargo_version=$(grep -m1 -A5 '^\[workspace\.package\]' Cargo.toml \
+            | grep -m1 '^version' \
+            | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Cargo.toml: $cargo_version"
+          test -n "$cargo_version"
+
+          # A literal versionName in Gradle would silently override the derived
+          # one and ship an APK claiming the wrong version.
+          if grep -nE '^\s*versionName\s*=\s*"' android/app/build.gradle.kts; then
+            echo "::error::android/app/build.gradle.kts 硬编码了 versionName；它应当从 Cargo.toml 读取"
+            exit 1
+          fi
+          if grep -nE '^\s*versionCode\s*=\s*[0-9]' android/app/build.gradle.kts; then
+            echo "::error::android/app/build.gradle.kts 硬编码了 versionCode；它应当从 Cargo.toml 推导"
+            exit 1
+          fi
+
   rust:
     name: Rust ${{ matrix.name }}
     runs-on: ${{ matrix.os }}

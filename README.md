@@ -189,17 +189,44 @@ docs/        协议与加密设计
 
 ## 发布
 
-推一个 `v*` 标签，GitHub Actions 会构建并发布三端产物：
+版本号只有一处：`Cargo.toml` 的 `[workspace.package] version`。Android 的
+`versionName` / `versionCode` 从它推导，CI 会拦住任何把版本号写死回 Gradle 的改动。
+
+**方式一：网页上点一下**
+
+Actions → Release → Run workflow，填入新版本号（如 `0.2.0`）→ Run。
+它会自动改 `Cargo.toml`、提交、打标签、构建三端、发布 Release。
+本地什么都不用做。
+
+**方式二：本地打标签**
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+# 先把 Cargo.toml 的版本改成 0.2.0，提交
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
-产物：`synctus-windows-x86_64.zip`、`synctus-linux-x86_64.tar.gz`、
-`synctus-android.apk`，附 `SHA256SUMS.txt`。
+标签与 `Cargo.toml` 不一致时会**直接失败**——否则构建出的程序会报告一个
+与所在 Release 不同的版本号，客户端的更新检查会永久提示有新版。
 
-APK 签名是可选的：配置了 `ANDROID_KEYSTORE_BASE64` 等 secrets 才签名，
-否则产出未签名 APK（两人自用场景够了，手动安装即可）。
+产物：`synctus-windows-x86_64.zip`、`synctus-linux-x86_64.tar.gz`、
+`synctus-android.apk`，附 `SHA256SUMS.txt`。Release 说明里自动列出自上个
+版本以来的提交。
+
+发布前会核对三件事：Windows/Linux 二进制的 `--version`、APK manifest 里的
+`versionName`、以及产物是否真的存在（缺任何一个就失败，而不是发一个空 Release）。
+
+APK 签名是可选的：配置了下面这些 secrets 才签名，否则产出
+`synctus-android-unsigned.apk` 并在 Release 说明里注明。
+
+| Secret | 内容 |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | keystore 文件的 base64（`base64 -w0 release.jks`） |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore 密码 |
+| `ANDROID_KEY_ALIAS` | 密钥别名 |
+| `ANDROID_KEY_PASSWORD` | 密钥密码 |
+
+预发布版本勾选 `prerelease` 即可——客户端的更新检查会忽略预发布，
+所以可以先发一版给自己试。
 
 ## 许可
 
