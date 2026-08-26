@@ -192,10 +192,26 @@ jobs:
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/synctus-server"
           test -x "$bin"
-          actual=$("$bin" --version | awk '{print $2}')
           expected='${{ needs.version.outputs.version }}'
-          echo "binary reports $actual, release is $expected"
-          test "$actual" = "$expected"
+
+          # On the host arch the binary can be run and asked. On a cross-arch
+          # build (aarch64 built on x86_64) it cannot, so the version string is
+          # read out of the binary instead — `env!("CARGO_PKG_VERSION")` embeds
+          # it as its own null-terminated literal.
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [ "${{ matrix.target }}" = "$host" ]; then
+            actual=$("$bin" --version | awk '{print $2}')
+            echo "binary reports $actual, release is $expected"
+            test "$actual" = "$expected"
+          else
+            if strings "$bin" | grep -Fqx "$expected"; then
+              echo "embedded version $expected: OK"
+            else
+              echo "::error::version $expected not found in $bin"
+              strings "$bin" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort -u || true
+              exit 1
+            fi
+          fi
 
       - name: Confirm it is statically linked (musl only)
         if: contains(matrix.target, 'musl')
@@ -206,11 +222,15 @@ jobs:
             file "$bin"
           fi
           if command -v ldd >/dev/null 2>&1; then
-            if ldd "$bin" 2>&1 | grep -q 'not a dynamic executable'; then
+            # cross builds static-PIE, and musl's ldd answers "statically
+            # linked"; glibc's answers "not a dynamic executable". Either is
+            # the pass condition.
+            out=$(ldd "$bin" 2>&1 || true)
+            if echo "$out" | grep -qE 'not a dynamic executable|statically linked'; then
               echo "statically linked: OK"
             else
-              echo "::error::musl binary is not static:"
-              ldd "$bin" || true
+              echo "::error::musl binary appears dynamically linked:"
+              echo "$out"
               exit 1
             fi
           fi
