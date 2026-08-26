@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Synctus</string>
+
+    <!-- Notification channels -->
+    <string name="channel_status">同步状态</string>
+    <string name="channel_status_desc">常驻通知，显示对方状态并保持后台连接</string>
+    <string name="channel_nudge">互动提醒</string>
+    <string name="channel_nudge_desc">对方的敲一敲、番茄钟结束等提醒</string>
+
+    <!-- Ongoing notification -->
+    <string name="status_waiting_peer">等待对方上线…</string>
+    <string name="status_no_peer_detail">尚未收到对方状态</string>
+    <string name="status_self_prefix">我：</string>
+
+    <!-- Connection states -->
+    <string name="conn_online">已连接</string>
+    <string name="conn_connecting">正在连接…</string>
+    <string name="conn_offline">已离线</string>
+    <string name="conn_rejected">配对失败</string>
+
+    <!-- Notification actions -->
+    <string name="action_knock">敲一敲</string>
+    <string name="action_knock_back">敲回去</string>
+    <string name="action_rest">去休息</string>
+    <string name="action_back_to_work">回来了</string>
+    <string name="action_start_focus">开始专注</string>
+    <string name="action_pause">暂停</string>
+    <string name="action_resume">继续</string>
+
+    <string name="pomodoro_title">番茄钟</string>
+
+    <!-- Warnings -->
+    <string name="warn_not_paired">尚未填写配对码，请打开应用完成配对</string>
+    <string name="warn_engine_failed">同步引擎启动失败</string>
+</resources>

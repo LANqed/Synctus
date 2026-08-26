@@ -1,0 +1,57 @@
+[package]
+name = "synctus-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Synctus desktop client: floating status overlay, tray, pomodoro and to-dos"
+
+[[bin]]
+name = "synctus"
+path = "src/main.rs"
+
+[dependencies]
+# `update` pulls in the GitHub release check, `tls` the encrypted transport.
+synctus-core = { workspace = true, features = ["tls", "update"] }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+directories.workspace = true
+
+# `glow` instead of the default `wgpu`: notably smaller binary and lighter at
+# runtime, which matters for a widget that is always on screen.
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
+tray-icon = "0.24"
+notify-rust = "4"
+auto-launch = "0.6"
+open = "5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Power",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+# WinRT projection, needed only for the media session (GSMTC). `windows-sys`
+# covers the plain Win32 calls with no extra weight.
+windows = { version = "0.62", features = [
+    "Media_Control",
+    "Foundation",
+    "Foundation_Collections",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.14", features = ["screensaver"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }

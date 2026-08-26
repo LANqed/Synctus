@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      A bare Material3 theme. Colours come from the dynamic scheme in Compose, so
+      the XML theme only needs to avoid an action bar and let Compose draw
+      everything.
+    -->
+    <style name="Theme.Synctus" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+    </style>
+</resources>

@@ -1,0 +1,34 @@
+[package]
+name = "synctus-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Synctus relay server: routes end-to-end encrypted status between paired devices"
+
+[[bin]]
+name = "synctus-server"
+path = "src/main.rs"
+
+[dependencies]
+synctus-core = { workspace = true, default-features = false }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = ["signal", "fs"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
+
+[dev-dependencies]
+# The end-to-end test drives real client engines against the real server binary,
+# so it needs the client half of `core` too.
+synctus-core = { workspace = true, features = ["tls"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

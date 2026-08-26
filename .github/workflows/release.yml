@@ -1,0 +1,221 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------- desktop
+  desktop:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: synctus-windows-x86_64.zip
+          - label: Linux x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: synctus-linux-x86_64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # ubuntu-22.04 rather than latest: linking against an older glibc keeps the
+      # binary usable on older distributions.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxdo-dev \
+            libayatana-appindicator3-dev \
+            libdbus-1-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            pkg-config
+
+      - name: Build desktop client and relay server
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p synctus-desktop
+          cargo build --release --target ${{ matrix.target }} -p synctus-server
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "dist/synctus"
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/synctus.exe" $dir
+          Copy-Item "target/${{ matrix.target }}/release/synctus-server.exe" $dir
+          Copy-Item "README.md" $dir
+          Copy-Item "docs/PROTOCOL.md" $dir
+          Copy-Item "deploy/server.example.toml" $dir
+          Compress-Archive -Path "$dir/*" -DestinationPath "${{ matrix.archive }}"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          dir=dist/synctus
+          mkdir -p "$dir"
+          cp "target/${{ matrix.target }}/release/synctus" "$dir/"
+          cp "target/${{ matrix.target }}/release/synctus-server" "$dir/"
+          cp README.md docs/PROTOCOL.md deploy/server.example.toml "$dir/"
+          cp deploy/synctus.service deploy/synctus-server.service "$dir/"
+          tar -czf "${{ matrix.archive }}" -C dist synctus
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  # ---------------------------------------------------------------- android
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    env:
+      # Lifted to the job so the steps below can test it in an `if:` — the
+      # `secrets` context is not available in step conditions.
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Set up NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          local-cache: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build native libraries
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk \
+            -t arm64-v8a \
+            -t x86_64 \
+            -o android/app/src/main/jniLibs \
+            build --release -p synctus-mobile
+
+      # Signing is optional: without the secrets the APK is unsigned and must be
+      # installed manually, which is fine for a two-person tool.
+      - name: Decode keystore
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "SYNCTUS_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        working-directory: android
+        env:
+          SYNCTUS_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SYNCTUS_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          SYNCTUS_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle --no-daemon assembleRelease
+
+      - name: Collect the APK
+        run: |
+          set -e
+          apk=$(find android/app/build/outputs/apk/release -name '*.apk' | head -n1)
+          test -n "$apk" || { echo "no APK produced"; exit 1; }
+          cp "$apk" synctus-android.apk
+          ls -l synctus-android.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synctus-android.apk
+          path: synctus-android.apk
+
+  # ---------------------------------------------------------------- publish
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: [desktop, android]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lR artifacts
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: Synctus ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*
+          body: |
+            ## 安装
+
+            | 平台 | 文件 |
+            | --- | --- |
+            | Windows | `synctus-windows-x86_64.zip` |
+            | Linux | `synctus-linux-x86_64.tar.gz` |
+            | Android | `synctus-android.apk` |
+
+            压缩包内同时包含中继服务器 `synctus-server` 与示例配置。
+
+            ## 首次使用
+
+            1. 在一台有公网地址的机器上运行 `synctus-server`（建议配置 TLS 证书）。
+            2. 三端都填入**同一个配对码**与服务器地址。
+            3. 配对码即密钥：服务器只转发密文，无法读取任何状态内容。
+
+            校验文件完整性：`sha256sum -c SHA256SUMS.txt`

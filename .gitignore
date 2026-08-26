@@ -1,0 +1,42 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/.kotlin/
+
+# The Rust .so files are built by CI or scripts/build-android-libs; never commit
+# binaries.
+android/app/src/main/jniLibs/
+
+# Release packaging
+/dist
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Local secrets and configuration. The invite code is key material.
+/config.toml
+/data.json
+/server.toml
+.env
+
+# Local agent/tool configuration that predates this project and contains
+# personal API endpoints. Not part of Synctus.
+/opencode.json
+/.opencode/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

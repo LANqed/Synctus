@@ -1,0 +1,37 @@
+# Synctus 中继服务器示例配置
+#
+# 所有项都可省略，未填写时使用注释中的默认值。
+# 环境变量优先于本文件，详见 `synctus-server --help`。
+
+# 监听地址。
+bind = "0.0.0.0:8787"
+
+# TLS 证书链与私钥（PEM）。两者都填写时服务器自行终止 TLS；
+# 若在 Nginx / Caddy 等反向代理后运行，可留空由代理处理。
+#
+# 注意：不配置 TLS 时，房间标识与设备标识会以明文经过网络。
+# 消息内容始终是端到端加密的，服务器无论如何都读不到。
+# cert_path = "/etc/letsencrypt/live/example.com/fullchain.pem"
+# key_path  = "/etc/letsencrypt/live/example.com/privkey.pem"
+
+# 单个房间允许的设备数。两人使用时 2 就够，默认留出余量
+# 以便一个人同时使用电脑和手机。
+max_devices_per_room = 8
+
+# 内存中保留的房间上限。这是防止陌生人用随机房间号
+# 让服务器无限分配内存的边界。
+max_rooms = 10000
+
+# 超过该秒数没有收到任何帧就断开连接。
+idle_timeout_secs = 90
+
+# 通告给客户端的心跳间隔，必须小于 idle_timeout_secs。
+heartbeat_secs = 25
+
+# 每设备每秒可转发的消息数（令牌桶）与突发额度。
+# 状态更新是事件驱动的，正常客户端远低于此值。
+rate_limit_per_sec = 10
+rate_limit_burst = 30
+
+# 客户端完成握手的时限。
+handshake_timeout_secs = 10

@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings so lint debt cannot accumulate.
+  RUSTFLAGS: -D warnings
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: Windows
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # The desktop client links against GTK (tray), X11 (window, idle) and
+      # D-Bus/AppIndicator (notifications, MPRIS).
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxdo-dev \
+            libayatana-appindicator3-dev \
+            libdbus-1-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            pkg-config
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
+  android-native:
+    name: Android native library
+    runs-on: ubuntu-latest
+    outputs:
+      built: ${{ steps.verify.outputs.built }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # Pin the NDK so a runner image update cannot silently change the toolchain.
+      - name: Set up NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          local-cache: true
+
+      - name: Build native library
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk \
+            -t arm64-v8a \
+            -t x86_64 \
+            -o android/app/src/main/jniLibs \
+            build --release -p synctus-mobile
+
+      - name: Verify the libraries exist
+        id: verify
+        run: |
+          set -e
+          for abi in arm64-v8a x86_64; do
+            path="android/app/src/main/jniLibs/$abi/libsynctus.so"
+            test -f "$path" || { echo "missing $path"; exit 1; }
+            echo "$path: $(stat -c%s "$path") bytes"
+          done
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-jnilibs
+          path: android/app/src/main/jniLibs/
+          retention-days: 7
+
+  android-app:
+    name: Android app
+    runs-on: ubuntu-latest
+    needs: android-native
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Gradle is installed by the action rather than committed as a wrapper JAR:
+      # a binary in the repository is both a review blind spot and a supply-chain
+      # risk. The version is pinned here instead.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Fetch the native libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: android-jnilibs
+          path: android/app/src/main/jniLibs/
+
+      - name: Unit tests
+        working-directory: android
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Assemble debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synctus-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7

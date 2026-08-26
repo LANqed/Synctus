@@ -1,0 +1,25 @@
+[Unit]
+Description=Synctus desktop client
+Documentation=https://github.com/LANqed/Synctus
+# Wait for the graphical session: the client needs a display for the overlay and
+# the tray icon.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/synctus --minimised
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=graphical-session.target
+
+# Install as a *user* unit, not a system one:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp synctus.service ~/.config/systemd/user/
+#   systemctl --user enable --now synctus
+#
+# The in-app "开机自动启动" toggle writes an XDG autostart entry instead, which
+# works on desktops without systemd user sessions. Use one or the other, not both.

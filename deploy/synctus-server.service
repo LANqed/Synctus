@@ -1,0 +1,46 @@
+[Unit]
+Description=Synctus relay server
+Documentation=https://github.com/LANqed/Synctus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/synctus-server --config /etc/synctus/server.toml
+Restart=on-failure
+RestartSec=5s
+
+# The relay holds no persistent state, so it can run as an unprivileged
+# system user with almost nothing available to it.
+DynamicUser=yes
+# Needed only when binding a port below 1024; the default 8787 does not need it.
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Reading the TLS certificate, when one is configured.
+ReadOnlyPaths=/etc/synctus /etc/letsencrypt
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# The relay is a few hundred KiB of state per room; this is a generous ceiling
+# that still stops a runaway from taking the host down.
+MemoryMax=256M
+
+Environment=SYNCTUS_LOG=synctus_server=info
+
+[Install]
+WantedBy=multi-user.target

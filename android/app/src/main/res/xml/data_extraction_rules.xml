@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backups are disabled in the manifest, but the rules file is still required by
+  the build. Excluding the preferences makes the intent explicit: the pairing code
+  is key material and must not end up in a cloud backup.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="synctus.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="synctus.xml" />
+    </device-transfer>
+</data-extraction-rules>
