@@ -183,19 +183,28 @@ group_exists() {
 
 # A service account with no login shell and no home: the relay needs a network
 # socket and nothing else.
-if [ "$INIT" != "none" ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
-    if command -v useradd >/dev/null 2>&1; then
-        useradd --system --no-create-home --shell /sbin/nologin "$SERVICE_USER" 2>/dev/null || true
-    else
-        # busybox (Alpine). Create the group explicitly first: some busybox
-        # builds do not auto-create a same-named group, and OpenRC's checkpath
-        # refuses to start the service when it cannot resolve the owner.
+if [ "$INIT" != "none" ]; then
+    # Ensure the group exists first, whether the account is fresh or left over
+    # from a previous partial install. Some busybox builds do not auto-create a
+    # same-named group, and OpenRC's checkpath refuses to start the service when
+    # it cannot resolve the owner — a user without its group looks exactly like
+    # that.
+    if ! group_exists "$SERVICE_USER"; then
         addgroup -S "$SERVICE_USER" 2>/dev/null || true
-        adduser -S -H -s /sbin/nologin -G "$SERVICE_USER" "$SERVICE_USER" 2>/dev/null || true
+    fi
+
+    if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+        if command -v useradd >/dev/null 2>&1; then
+            useradd --system --no-create-home --shell /sbin/nologin \
+                -g "$SERVICE_USER" "$SERVICE_USER" 2>/dev/null || true
+        else
+            # busybox (Alpine).
+            adduser -S -H -s /sbin/nologin -G "$SERVICE_USER" "$SERVICE_USER" 2>/dev/null || true
+        fi
     fi
 
     if id "$SERVICE_USER" >/dev/null 2>&1 && group_exists "$SERVICE_USER"; then
-        say "  已创建  服务账号 $SERVICE_USER"
+        say "  服务账号 $SERVICE_USER"
     else
         warn "无法创建服务账号 $SERVICE_USER，将用 root 运行（可在安装后手动修复）"
         SERVICE_USER="root"
