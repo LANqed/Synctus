@@ -55,7 +55,7 @@ object Notifications {
             description = context.getString(R.string.channel_nudge_desc)
             enableVibration(true)
             enableLights(true)
-            lightColor = Color.parseColor("#42A5F5")
+            lightColor = Color.parseColor("#39C5BB")
         }
 
         manager.createNotificationChannel(status)

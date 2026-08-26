@@ -641,19 +641,28 @@ fn peer_detail(peer: &StatusSnapshot, now: i64, stale: bool) -> String {
     if stale {
         return format!("最后更新于 {} 秒前", (now - peer.at) / 1000);
     }
-    if let Some(music) = &peer.music {
-        if music.playing {
-            return format!("♪ {}", music.one_line());
-        }
-    }
-    if let Some(fg) = &peer.foreground {
+
+    // Both at once: the song and the foreground app, as requested.
+    let music = peer
+        .music
+        .as_ref()
+        .filter(|m| m.playing)
+        .map(|m| format!("♪ {}", m.one_line()));
+
+    let app_line = peer.foreground.as_ref().map(|fg| {
         let name = fg.name.clone().unwrap_or_else(|| fg.app.clone());
-        return match &fg.title {
+        match &fg.title {
             Some(t) => format!("{name}：{t}"),
             None => name,
-        };
+        }
+    });
+
+    match (music, app_line) {
+        (Some(m), Some(a)) => format!("{m}　·　{a}"),
+        (Some(m), None) => m,
+        (None, Some(a)) => a,
+        (None, None) => "空闲".to_string(),
     }
-    "空闲".to_string()
 }
 
 fn peer_meta(peer: &StatusSnapshot, now: i64) -> String {
@@ -931,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_detail_prefers_music_then_app() {
+    fn peer_detail_shows_music_and_app_together() {
         let mut peer = StatusSnapshot::new("d", "Peer");
         peer.foreground = Some(ForegroundApp {
             app: "com.example".into(),
@@ -947,9 +956,10 @@ mod tests {
             player: None,
             playing: true,
         });
-        assert_eq!(peer_detail(&peer, peer.at, false), "♪ 歌手 - 歌名");
+        // Both at once, as requested.
+        assert_eq!(peer_detail(&peer, peer.at, false), "♪ 歌手 - 歌名　·　示例");
 
-        // A paused track falls back to the app.
+        // A paused track drops the music but keeps the app.
         peer.music.as_mut().unwrap().playing = false;
         assert_eq!(peer_detail(&peer, peer.at, false), "示例");
     }

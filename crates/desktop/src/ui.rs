@@ -50,6 +50,16 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
     let mut request = None;
     let now = synctus_core::now_ms();
 
+    // The background response is created *before* the content so the content sits
+    // on top of it. Created after, it would cover the todo checkboxes and the
+    // text field, swallowing their clicks — which is why typing and ticking
+    // seemed to do nothing.
+    let background = ui.interact(
+        ui.max_rect(),
+        egui::Id::new("overlay-bg"),
+        egui::Sense::click_and_drag(),
+    );
+
     egui::Frame::new()
         .fill(ui.visuals().window_fill.gamma_multiply(0.92))
         .corner_radius(10.0)
@@ -136,7 +146,7 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
 
             // The to-do list, shown when the user asks for it.
             if state.show_todos {
-                overlay_todos(ui, app);
+                overlay_todos(ui, app, state);
             }
 
             // Recent poke, shown briefly.
@@ -156,20 +166,14 @@ pub fn overlay(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) -> Option<
         });
 
     // Right-click anywhere on the overlay opens the menu.
-    let area = ui.min_rect();
-    let response = ui.interact(
-        area,
-        egui::Id::new("overlay-bg"),
-        egui::Sense::click_and_drag(),
-    );
-    response.context_menu(|ui| {
+    background.context_menu(|ui| {
         if let Some(req) = menu(ui, app, state) {
             request = Some(req);
         }
     });
 
     // Dragging the overlay moves the window; the position is saved on exit.
-    if response.dragged() {
+    if background.dragged() {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
 
@@ -457,22 +461,23 @@ pub fn menu(ui: &mut egui::Ui, app: &App, state: &mut UiState) -> Option<UiReque
 /// Own list, editable inline; the peer's list is read-only below a divider. The
 /// peer's list is already rendered in the settings Todos tab, but the user asked
 /// for it here too.
-fn overlay_todos(ui: &mut egui::Ui, app: &mut App) {
+fn overlay_todos(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) {
     ui.separator();
 
     let mut toggled: Option<String> = None;
     let mut removed: Option<String> = None;
-    let mut new_title = String::new();
     let mut add = false;
 
-    // A compact single-line editor.
-    let edit = egui::TextEdit::singleline(&mut new_title)
+    // The text field's content lives in `UiState`, not in a local: in immediate
+    // mode a local `String::new()` is rebuilt every frame, so every keystroke
+    // would be wiped before it could be submitted.
+    let edit = egui::TextEdit::singleline(&mut state.new_todo)
         .hint_text("新待办，回车添加")
         .desired_width(ui.available_width() - 44.0);
     let response = ui.add(edit);
     if response.lost_focus()
         && ui.input(|i| i.key_pressed(egui::Key::Enter))
-        && !new_title.trim().is_empty()
+        && !state.new_todo.trim().is_empty()
     {
         add = true;
     }
@@ -515,7 +520,8 @@ fn overlay_todos(ui: &mut egui::Ui, app: &mut App) {
     }
 
     if add {
-        app.add_todo(&new_title);
+        app.add_todo(&state.new_todo);
+        state.new_todo.clear();
     }
     if let Some(id) = toggled {
         app.toggle_todo(&id);
@@ -525,7 +531,8 @@ fn overlay_todos(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// One line describing what the peer is doing.
+/// One line describing what the peer is doing: the song and the app together,
+/// because both are asked for at once.
 fn peer_detail(app: &App, now: i64) -> String {
     let Some(peer) = app.peer() else {
         return "尚未收到对方状态".to_string();
@@ -536,19 +543,26 @@ fn peer_detail(app: &App, now: i64) -> String {
         return format!("最后更新于 {secs} 秒前");
     }
 
-    if let Some(music) = &peer.music {
-        if music.playing {
-            return format!("♪ {}", music.one_line());
-        }
-    }
-    if let Some(fg) = &peer.foreground {
+    let music = peer
+        .music
+        .as_ref()
+        .filter(|m| m.playing)
+        .map(|m| format!("♪ {}", m.one_line()));
+
+    let app_line = peer.foreground.as_ref().map(|fg| {
         let name = fg.name.clone().unwrap_or_else(|| fg.app.clone());
-        return match &fg.title {
+        match &fg.title {
             Some(t) => format!("{name}：{t}"),
             None => name,
-        };
+        }
+    });
+
+    match (music, app_line) {
+        (Some(m), Some(a)) => format!("{m}　·　{a}"),
+        (Some(m), None) => m,
+        (None, Some(a)) => a,
+        (None, None) => "空闲".to_string(),
     }
-    "空闲".to_string()
 }
 
 /// Battery, pomodoro and to-do counters as a compact line.

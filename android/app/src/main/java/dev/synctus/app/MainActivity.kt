@@ -133,8 +133,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun SynctusTheme(content: @Composable () -> Unit) {
-    // The brand accent, #39E6E5, as the primary colour in both schemes.
-    val accent = Color(0xFF39E6E5)
+    // The brand accent, #39C5BB, as the primary colour in both schemes.
+    val accent = Color(0xFF39C5BB)
     val scheme = if (isSystemInDarkTheme()) {
         darkColorScheme(primary = accent, onPrimary = Color(0xFF002020))
     } else {

@@ -1,13 +1,13 @@
 //! The Synctus look: one accent colour everywhere.
 //!
-//! The brand colour is `#39e6e5` — the teal used for focus bars, the tray icon,
+//! The brand colour is `#39C5BB` — the teal used for focus bars, the tray icon,
 //! the WebUI and the Android app. It is defined here once and the platform layers
 //! read it, so changing the theme is a one-line change instead of a hunt.
 
 use eframe::egui;
 
-/// The brand accent. `#39e6e5` in sRGB.
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x39, 0xe6, 0xe5);
+/// The brand accent. `#39C5BB` in sRGB.
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x39, 0xC5, 0xBB);
 
 /// Apply the accent to egui's built-in widgets.
 pub fn install(ctx: &egui::Context) {
@@ -44,6 +44,6 @@ mod tests {
 
     #[test]
     fn the_accent_is_the_brand_colour() {
-        assert_eq!(ACCENT, egui::Color32::from_rgb(0x39, 0xe6, 0xe5));
+        assert_eq!(ACCENT, egui::Color32::from_rgb(0x39, 0xC5, 0xBB));
     }
 }
