@@ -419,10 +419,17 @@ fn print_client_info() -> Result<()> {
 
 fn config_path() -> PathBuf {
     // An override keeps the tool usable for a non-root install or a test setup.
-    if let Ok(p) = std::env::var("SYNCTUS_CONFIG") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    resolve_config_path(std::env::var("SYNCTUS_CONFIG").ok().as_deref())
+}
+
+/// The override rule, as a pure function.
+///
+/// Kept separate from the environment so the tests do not have to mutate a
+/// process-global variable — four tests doing that in parallel is how a test
+/// starts reading another test's value.
+fn resolve_config_path(override_value: Option<&str>) -> PathBuf {
+    if let Some(p) = override_value.map(str::trim).filter(|s| !s.is_empty()) {
+        return PathBuf::from(p);
     }
     PathBuf::from(DEFAULT_CONFIG)
 }
@@ -432,10 +439,12 @@ fn config_path() -> PathBuf {
 /// Also read on non-Unix builds so the override behaviour, and its test, stay the
 /// same everywhere even though connecting is Unix-only.
 fn socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("SYNCTUS_ADMIN_SOCKET") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    resolve_socket_path(std::env::var("SYNCTUS_ADMIN_SOCKET").ok().as_deref())
+}
+
+fn resolve_socket_path(override_value: Option<&str>) -> PathBuf {
+    if let Some(p) = override_value.map(str::trim).filter(|s| !s.is_empty()) {
+        return PathBuf::from(p);
     }
     PathBuf::from(admin::DEFAULT_SOCKET)
 }
@@ -459,11 +468,20 @@ fn query_rooms() -> Result<Vec<admin::RoomInfo>> {
 /// One request, one response, over the admin socket.
 #[cfg(unix)]
 fn ask_daemon(request: admin::Request) -> Result<admin::Response> {
+    let path = socket_path();
+    ask_daemon_at(request, &path)
+}
+
+/// The actual socket exchange, with the path passed in.
+///
+/// Split out so the error path is testable without touching a process-global
+/// environment variable.
+#[cfg(unix)]
+fn ask_daemon_at(request: admin::Request, path: &std::path::Path) -> Result<admin::Response> {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
 
-    let path = socket_path();
-    let stream = UnixStream::connect(&path)
+    let stream = UnixStream::connect(path)
         .with_context(|| format!("连接管理套接字失败: {}", path.display()))?;
     // A hung daemon must not hang the tool.
     stream
@@ -575,32 +593,44 @@ mod tests {
 
     #[test]
     fn config_path_honours_the_override() {
-        std::env::set_var("SYNCTUS_CONFIG", "/tmp/synctus-test.toml");
-        assert_eq!(config_path(), PathBuf::from("/tmp/synctus-test.toml"));
-        std::env::remove_var("SYNCTUS_CONFIG");
-        assert_eq!(config_path(), PathBuf::from(DEFAULT_CONFIG));
+        assert_eq!(
+            resolve_config_path(Some("/tmp/synctus-test.toml")),
+            PathBuf::from("/tmp/synctus-test.toml")
+        );
+        assert_eq!(resolve_config_path(None), PathBuf::from(DEFAULT_CONFIG));
     }
 
     #[test]
     fn a_blank_override_falls_back_to_the_default() {
         // An exported-but-empty variable is a common shell accident.
-        std::env::set_var("SYNCTUS_CONFIG", "");
-        assert_eq!(config_path(), PathBuf::from(DEFAULT_CONFIG));
-        std::env::remove_var("SYNCTUS_CONFIG");
+        for blank in [Some(""), Some("   ")] {
+            assert_eq!(resolve_config_path(blank), PathBuf::from(DEFAULT_CONFIG));
+        }
     }
 
     #[test]
     fn socket_path_honours_the_override() {
-        std::env::set_var("SYNCTUS_ADMIN_SOCKET", "/tmp/s.sock");
-        assert_eq!(socket_path(), PathBuf::from("/tmp/s.sock"));
-        std::env::remove_var("SYNCTUS_ADMIN_SOCKET");
-        assert_eq!(socket_path(), PathBuf::from(admin::DEFAULT_SOCKET));
+        assert_eq!(
+            resolve_socket_path(Some("/tmp/s.sock")),
+            PathBuf::from("/tmp/s.sock")
+        );
+        assert_eq!(
+            resolve_socket_path(None),
+            PathBuf::from(admin::DEFAULT_SOCKET)
+        );
     }
 
     #[test]
     fn asking_the_daemon_without_one_running_is_an_error_not_a_hang() {
-        std::env::set_var("SYNCTUS_ADMIN_SOCKET", "/tmp/synctus-nonexistent-9f2a.sock");
-        assert!(query_status().is_err());
-        std::env::remove_var("SYNCTUS_ADMIN_SOCKET");
+        #[cfg(unix)]
+        {
+            // No env mutation: the path is passed straight in, so this test
+            // cannot be affected by (or affect) the others running in parallel.
+            assert!(ask_daemon_at(
+                admin::Request::Status,
+                &PathBuf::from("/tmp/synctus-nonexistent-9f2a.sock")
+            )
+            .is_err());
+        }
     }
 }
