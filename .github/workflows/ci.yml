@@ -86,17 +86,22 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # Pin the NDK so a runner image update cannot silently change the toolchain.
-      - name: Set up NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          local-cache: true
+      # The runner image ships a complete NDK. `nttld/setup-ndk` was tried first
+      # but its cache can restore a directory without `toolchains/`, which fails
+      # at link time with a missing `clang`; the preinstalled one is always whole.
+      # The version is logged so a runner image change is visible rather than
+      # silent.
+      - name: Locate the NDK
+        run: |
+          set -e
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          clang="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          test -x "$clang" || { echo "no usable NDK at $ndk"; exit 1; }
+          echo "Using NDK $ndk"
+          "$clang" --version | head -n1
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
 
       - name: Build native library
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           cargo ndk \
             -t arm64-v8a \

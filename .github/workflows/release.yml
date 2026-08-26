@@ -119,12 +119,18 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: Set up NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          local-cache: true
+      # Use the NDK that ships with the runner image. `nttld/setup-ndk` can
+      # restore a cached directory without `toolchains/`, which fails at link
+      # time with a missing `clang`.
+      - name: Locate the NDK
+        run: |
+          set -e
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          clang="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          test -x "$clang" || { echo "no usable NDK at $ndk"; exit 1; }
+          echo "Using NDK $ndk"
+          "$clang" --version | head -n1
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -136,8 +142,6 @@ jobs:
           gradle-version: '8.11.1'
 
       - name: Build native libraries
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           cargo ndk \
             -t arm64-v8a \
