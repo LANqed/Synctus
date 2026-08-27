@@ -34,6 +34,10 @@ android/app/src/main/jniLibs/
 /opencode.json
 /.opencode/
 
+# Python (AstrBot plugin on astrbot-plugin branch)
+__pycache__/
+*.pyc
+
 # Third-party reference clone (astrbot_plugin_private_companion), only for
 # study on the astrbot-plugin branch; never commit vendored history.
 /reference/
