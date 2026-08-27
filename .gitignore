@@ -34,6 +34,10 @@ android/app/src/main/jniLibs/
 /opencode.json
 /.opencode/
 
+# Third-party reference clone (astrbot_plugin_private_companion), only for
+# study on the astrbot-plugin branch; never commit vendored history.
+/reference/
+
 # Editors
 .vscode/
 .idea/

@@ -1,0 +1,73 @@
+{
+  "bot_name": {
+    "description": "Bot 的名字",
+    "type": "string",
+    "default": "小澈",
+    "hint": "用在「陪伴 状态」「陪伴 日程」等回复里，让日程播报有自称。"
+  },
+  "target_users": {
+    "description": "主动陪伴的目标用户",
+    "type": "list",
+    "items": { "type": "string" },
+    "default": [],
+    "hint": "填 QQ 号（自动按 aiocqhttp 私聊处理）或完整会话标识（如 aiocqhttp:FriendMessage:10001、qq_official:FriendMessage:openid）。多个用户会各自收到陪伴消息。"
+  },
+  "enable_transition": {
+    "description": "日程切换时主动汇报",
+    "type": "bool",
+    "default": true,
+    "hint": "例如起床发早安、开始专注时说一声去忙了、睡前发晚安。"
+  },
+  "enable_idle_chat": {
+    "description": "空闲时段随机搭话",
+    "type": "bool",
+    "default": true,
+    "hint": "只在日程里标记允许搭话的时段触发；睡觉和专注时段不会打扰。"
+  },
+  "idle_chance_per_minute": {
+    "description": "随机搭话概率（每分钟）",
+    "type": "float",
+    "default": 0.006,
+    "hint": "每分钟按该概率决定是否找用户说话；0.006 约合白天每小时 0.36 次。设为 0 关闭随机搭话。",
+    "slider": { "min": 0.0, "max": 0.05, "step": 0.001 }
+  },
+  "max_daily_messages": {
+    "description": "每日主动消息上限（每用户）",
+    "type": "int",
+    "default": 15,
+    "hint": "日程切换汇报和随机搭话共用这个额度。",
+    "slider": { "min": 3, "max": 30, "step": 1 }
+  },
+  "min_gap_minutes": {
+    "description": "两条主动消息最小间隔（分钟）",
+    "type": "int",
+    "default": 40,
+    "hint": "避免短时间内连续刷屏；日程切换汇报只受 5 分钟间隔限制，早安晚安不会被顶掉。",
+    "slider": { "min": 10, "max": 240, "step": 5 }
+  },
+  "quiet_hours": {
+    "description": "免打扰时段",
+    "type": "string",
+    "default": "23:00-08:00",
+    "hint": "格式 HH:MM-HH:MM，支持跨午夜；期间不触发随机搭话，日程的早安/晚安不受影响。留空关闭。"
+  },
+  "custom_schedule": {
+    "description": "自定义日程（可选）",
+    "type": "template_list",
+    "default": [],
+    "hint": "留空使用内置默认日程（07:30 起床 ~ 22:30 睡觉的学生/自由职业作息）。填写后将完全替换默认日程；结束时间可小于开始时间表示跨午夜（如睡觉 22:30-07:30）。段与段之间的空隙会自动并入前一段。",
+    "templates": {
+      "segment": {
+        "name": "日程段",
+        "items": {
+          "start": { "description": "开始时间（HH:MM）", "type": "string", "default": "08:00" },
+          "end": { "description": "结束时间（HH:MM，可小于开始表示跨午夜）", "type": "string", "default": "09:00" },
+          "activity": { "description": "活动内容", "type": "string", "default": "做自己的事" },
+          "mood": { "description": "心情（两三个词）", "type": "string", "default": "平静" },
+          "interruptible": { "description": "该时段允许随机搭话", "type": "bool", "default": true },
+          "messages": { "description": "进入该时段时说的话（每行一句，随机挑一句，可留空）", "type": "text", "default": "" }
+        }
+      }
+    }
+  }
+}

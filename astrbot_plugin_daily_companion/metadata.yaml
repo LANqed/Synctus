@@ -1,0 +1,23 @@
+name: astrbot_plugin_daily_companion
+display_name: 今天也陪着你
+author: LANqed
+author_url: https://github.com/LANqed
+description: 让 Bot 拥有自己的一天：起床、吃饭、专注、摸鱼、睡觉，并在日程切换与空闲时主动找你说话，带来持续的生活感陪伴。
+desc: 基于 Bot 自身日程的轻量陪伴插件：日程切换主动汇报、空闲随机搭话、可查询日程与状态，无需 LLM。
+repo: https://github.com/LANqed/Synctus
+category: AI 增强
+tags:
+  - 陪伴
+  - 日程
+  - 生活模拟
+  - 主动消息
+help: |
+  私聊发送：
+  - 陪伴 状态：看 Bot 现在在做什么、下一段安排
+  - 陪伴 日程：看 Bot 今天的完整日程
+  - 陪伴 静音 / 陪伴 恢复：暂停或恢复主动消息
+  - 日程：等价于「陪伴 日程」
+
+  Bot 会在每次日程切换时（早安、去专注、午休、晚安等）和空闲时段随机主动找你说话；睡觉时段与免打扰时段保持安静。请在插件配置的 target_users 中填写 QQ 号或完整会话标识。
+version: v1.0.0
+astrbot_version: ">=4.0.0"
