@@ -3811,7 +3811,7 @@ dependencies = [
 
 [[package]]
 name = "synctus-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3837,7 +3837,7 @@ dependencies = [
 
 [[package]]
 name = "synctus-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "synctus-mobile"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3876,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "synctus-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
