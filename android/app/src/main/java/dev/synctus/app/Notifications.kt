@@ -7,31 +7,38 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.media.AudioAttributes
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 
 /**
  * The notification layer.
  *
- * Two channels with different behaviour:
+ * Three channels with different behaviour:
  *
  * * [CHANNEL_STATUS] — the ongoing foreground notification. Silent and low
  *   importance, because it is on screen permanently; this is also what keeps the
  *   process alive.
- * * [CHANNEL_NUDGE] — pokes from the peer and pomodoro boundaries. High
- *   importance so they actually surface.
+ * * [CHANNEL_NUDGE] — pokes from the peer. High importance so they actually
+ *   surface.
+ * * [CHANNEL_POMODORO] — the user's own timer boundaries: work over, rest
+ *   ending. Sound is set explicitly because these are the reminders the whole
+ *   product hinges on, and some ROMs create channels silent when the sound is
+ *   left to the default.
  */
 object Notifications {
 
     const val CHANNEL_STATUS = "synctus.status"
     const val CHANNEL_NUDGE = "synctus.nudge"
+    const val CHANNEL_POMODORO = "synctus.pomodoro"
 
     const val ID_STATUS = 1001
     private const val ID_NUDGE = 1002
     private const val ID_POMODORO = 1003
     private const val ID_GOAL = 1004
 
-    /** Create both channels. Idempotent, so it runs on every app start. */
+    /** Create the channels. Idempotent, so it runs on every app start. */
     fun createChannels(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
 
@@ -58,8 +65,32 @@ object Notifications {
             lightColor = Color.parseColor("#39C5BB")
         }
 
+        // The pomodoro reminders are for the user's own transition moments, so
+        // they must be audible even where a bare IMPORTANCE_HIGH channel ends up
+        // silent. The sound is set on the channel because on O+ that is the only
+        // place Android reads it from.
+        val pomodoro = NotificationChannel(
+            CHANNEL_POMODORO,
+            context.getString(R.string.channel_pomodoro),
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = context.getString(R.string.channel_pomodoro_desc)
+            setSound(
+                Settings.System.DEFAULT_NOTIFICATION_URI,
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build(),
+            )
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 200, 150, 200)
+            enableLights(true)
+            lightColor = Color.parseColor("#39C5BB")
+        }
+
         manager.createNotificationChannel(status)
         manager.createNotificationChannel(nudge)
+        manager.createNotificationChannel(pomodoro)
     }
 
     /**
@@ -288,13 +319,17 @@ object Notifications {
         }
     }
 
-    /** Announce a pomodoro boundary. */
+    /** Announce a pomodoro boundary: work over, rest ending, or rest over. */
     fun showPomodoro(context: Context, event: BridgeEvent.Pomodoro) {
-        if (!event.finished) return
+        val title = when (event.kind) {
+            "break_ending" -> context.getString(R.string.pomodoro_break_ending_title)
+            "break_finished" -> context.getString(R.string.pomodoro_break_finished_title)
+            else -> context.getString(R.string.pomodoro_title)
+        }
 
-        val notification = NotificationCompat.Builder(context, CHANNEL_NUDGE)
+        val notification = NotificationCompat.Builder(context, CHANNEL_POMODORO)
             .setSmallIcon(R.drawable.ic_pomodoro)
-            .setContentTitle(context.getString(R.string.pomodoro_title))
+            .setContentTitle(title)
             .setContentText(event.message)
             .setContentIntent(openAppIntent(context))
             .setAutoCancel(true)

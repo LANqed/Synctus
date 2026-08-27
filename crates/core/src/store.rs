@@ -174,9 +174,18 @@ pub enum PomodoroEvent {
         /// caller needs this rather than just a round count.
         minutes: u32,
     },
+    /// A break will end soon. Fires once per break, inside the warning window,
+    /// so the user has a chance to wind down before the work switch.
+    BreakEndingSoon {
+        /// Seconds left until the break ends.
+        seconds: u32,
+    },
     /// A break finished.
     BreakFinished,
 }
+
+/// How long before a break ends the "get ready to work again" reminder fires.
+pub const BREAK_END_WARNING_SECS: i64 = 15;
 
 /// The pomodoro timer.
 ///
@@ -186,6 +195,9 @@ pub enum PomodoroEvent {
 pub struct Pomodoro {
     cfg: PomodoroConfig,
     state: PomodoroState,
+    /// Whether [`PomodoroEvent::BreakEndingSoon`] was already emitted for the
+    /// current break, so it fires once rather than on every tick.
+    break_warning_sent: bool,
 }
 
 impl Pomodoro {
@@ -197,6 +209,7 @@ impl Pomodoro {
                 completed_today,
                 ..Default::default()
             },
+            break_warning_sent: false,
         }
     }
 
@@ -230,6 +243,8 @@ impl Pomodoro {
         self.state.phase = phase;
         self.state.paused_left_ms = None;
         self.state.ends_at = Some(now + self.phase_minutes(phase) as i64 * 60_000);
+        // A fresh phase re-arms the end-of-break reminder.
+        self.break_warning_sent = false;
     }
 
     /// Start a focus round.
@@ -264,6 +279,7 @@ impl Pomodoro {
         self.state.phase = PomodoroPhase::Idle;
         self.state.ends_at = None;
         self.state.paused_left_ms = None;
+        self.break_warning_sent = false;
     }
 
     /// End the current phase immediately, as if the deadline had passed.
@@ -282,7 +298,19 @@ impl Pomodoro {
         if self.state.phase == PomodoroPhase::Idle || self.state.paused() {
             return PomodoroEvent::Nothing;
         }
-        if self.state.remaining_ms(now) > 0 {
+
+        let remaining = self.state.remaining_ms(now);
+        if remaining > 0 {
+            // Inside a break, warn once as the end approaches.
+            if self.state.phase.is_break()
+                && !self.break_warning_sent
+                && remaining <= BREAK_END_WARNING_SECS * 1000
+            {
+                self.break_warning_sent = true;
+                return PomodoroEvent::BreakEndingSoon {
+                    seconds: (remaining / 1000).max(1) as u32,
+                };
+            }
             return PomodoroEvent::Nothing;
         }
 
@@ -329,6 +357,29 @@ impl Pomodoro {
             PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => Some(Presence::Resting),
             PomodoroPhase::Idle => None,
         }
+    }
+
+    /// Milliseconds until the next moment [`tick`](Self::tick) has something to
+    /// report, or `None` when nothing is pending.
+    ///
+    /// Exists because a caller that polls on a fixed interval can step straight
+    /// over the end-of-break window: with a 60-second poll, a sample at 20
+    /// seconds left is followed by one 40 seconds *after* the break ended, and the
+    /// reminder never fires. A caller can cap its sleep with this instead.
+    pub fn next_tick_in_ms(&self, now: i64) -> Option<i64> {
+        if self.state.phase == PomodoroPhase::Idle || self.state.paused() {
+            return None;
+        }
+
+        let remaining = self.state.remaining_ms(now);
+        let warning_at = BREAK_END_WARNING_SECS * 1000;
+
+        // The reminder comes first, so it is the deadline that matters while it is
+        // still ahead of us.
+        if self.state.phase.is_break() && !self.break_warning_sent && remaining > warning_at {
+            return Some(remaining - warning_at);
+        }
+        Some(remaining)
     }
 }
 
@@ -524,6 +575,118 @@ mod tests {
         let mut p = Pomodoro::new(cfg(), 0, 0);
         p.start_focus(0);
         assert!(matches!(p.skip(MIN), PomodoroEvent::FocusFinished { .. }));
+    }
+
+    #[test]
+    fn break_ending_warning_fires_once_near_the_end() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        // 5-minute short break, starts at t=0, ends at t=5m.
+        p.start(PomodoroPhase::ShortBreak, 0);
+
+        // Early in the break: nothing.
+        assert_eq!(p.tick(MIN), PomodoroEvent::Nothing);
+
+        // 14 seconds before the end: the warning.
+        let event = p.tick(5 * MIN - 14_000);
+        assert_eq!(event, PomodoroEvent::BreakEndingSoon { seconds: 14 });
+
+        // And it must not fire again on subsequent ticks.
+        assert_eq!(p.tick(5 * MIN - 5_000), PomodoroEvent::Nothing);
+        assert_eq!(p.tick(5 * MIN - 1_000), PomodoroEvent::Nothing);
+    }
+
+    #[test]
+    fn break_ending_warning_is_skipped_while_paused() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        p.start(PomodoroPhase::ShortBreak, 0);
+        p.pause(4 * MIN + 50_000); // 10s left, then paused.
+        assert!(p.state().paused());
+        // Paused means no warning: the user has already stepped away.
+        assert_eq!(p.tick(5 * MIN), PomodoroEvent::Nothing);
+        // Even after the deadline passes while paused.
+        assert_eq!(p.tick(60 * MIN), PomodoroEvent::Nothing);
+    }
+
+    #[test]
+    fn break_ending_warning_rearms_for_the_next_break() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        p.start(PomodoroPhase::ShortBreak, 0);
+        assert_eq!(
+            p.tick(5 * MIN - 10_000),
+            PomodoroEvent::BreakEndingSoon { seconds: 10 }
+        );
+
+        // Break ends, then a new one starts: warning must fire again.
+        p.tick(5 * MIN);
+        p.start(PomodoroPhase::ShortBreak, 10 * MIN);
+        assert_eq!(
+            p.tick(15 * MIN - 10_000),
+            PomodoroEvent::BreakEndingSoon { seconds: 10 }
+        );
+    }
+
+    #[test]
+    fn the_warning_fires_for_long_breaks_too() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        p.start(PomodoroPhase::LongBreak, 0);
+        assert_eq!(
+            p.tick(15 * MIN - 12_000),
+            PomodoroEvent::BreakEndingSoon { seconds: 12 }
+        );
+    }
+
+    /// The reminder is about a *break* ending. A focus round ending has its own
+    /// event, and warning fifteen seconds early would just interrupt the work.
+    #[test]
+    fn no_early_warning_during_a_focus_round() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        p.start_focus(0);
+        assert_eq!(p.tick(25 * MIN - 14_000), PomodoroEvent::Nothing);
+        assert!(matches!(
+            p.tick(25 * MIN),
+            PomodoroEvent::FocusFinished { .. }
+        ));
+    }
+
+    /// Exactly at the boundary the warning is due, not one tick later.
+    #[test]
+    fn the_warning_window_includes_its_own_edge() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        p.start(PomodoroPhase::ShortBreak, 0);
+        assert_eq!(p.tick(5 * MIN - 16_000), PomodoroEvent::Nothing);
+        assert_eq!(
+            p.tick(5 * MIN - 15_000),
+            PomodoroEvent::BreakEndingSoon { seconds: 15 }
+        );
+    }
+
+    /// A caller polling on a fixed interval would step over the fifteen-second
+    /// window; `next_tick_in_ms` is what lets it land inside.
+    #[test]
+    fn next_tick_lands_on_the_warning_then_on_the_end() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        assert_eq!(p.next_tick_in_ms(0), None); // idle
+
+        p.start(PomodoroPhase::ShortBreak, 0);
+        // 5m break, warning at 15s left: 4m45s away.
+        assert_eq!(p.next_tick_in_ms(0), Some(4 * MIN + 45_000));
+
+        // After the warning fired, the next thing due is the end itself.
+        p.tick(5 * MIN - 15_000);
+        assert_eq!(p.next_tick_in_ms(5 * MIN - 15_000), Some(15_000));
+
+        // Paused: nothing is due until it resumes.
+        p.pause(5 * MIN - 10_000);
+        assert_eq!(p.next_tick_in_ms(5 * MIN - 10_000), None);
+    }
+
+    /// During focus the only deadline is the end of the round.
+    #[test]
+    fn next_tick_during_focus_is_the_end_of_the_round() {
+        let mut p = Pomodoro::new(cfg(), 0, 0);
+        p.start_focus(0);
+        assert_eq!(p.next_tick_in_ms(0), Some(25 * MIN));
+        assert_eq!(p.next_tick_in_ms(24 * MIN), Some(MIN));
     }
 
     #[test]

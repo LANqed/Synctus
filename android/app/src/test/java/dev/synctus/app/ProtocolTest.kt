@@ -2,6 +2,7 @@ package dev.synctus.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlinx.serialization.encodeToString
@@ -162,6 +163,25 @@ class ProtocolTest {
         assertEquals(0, status.focusTodayMin)
         assertFalse(status.goalMet)
         assertFalse(status.distracted)
+    }
+
+    @Test
+    fun `pomodoro events carry the kind that picks their title`() {
+        val events = SynctusJson.decodeFromString<List<BridgeEvent>>(
+            """[{"type":"pomodoro","kind":"break_ending","phase":"小休",""" +
+                """"remaining":"00:12","finished":false,"message":"休息时间快结束了"}]"""
+        )
+        val event = events.first() as BridgeEvent.Pomodoro
+        assertEquals("break_ending", event.kind)
+        assertFalse(event.finished)
+    }
+
+    @Test
+    fun `local status exposes the next pomodoro alert delay`() {
+        val status = SynctusJson.decodeFromString<LocalStatus>("""{"next_alert_ms":15000}""")
+        assertEquals(15000L, status.nextAlertMs)
+        // Idle pomodoro: nothing pending.
+        assertNull(SynctusJson.decodeFromString<LocalStatus>("""{}""").nextAlertMs)
     }
 
     @Test

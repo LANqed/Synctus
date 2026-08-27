@@ -83,6 +83,17 @@ pub enum BridgeCommand {
     },
 }
 
+/// Which pomodoro boundary a [`BridgeEvent::Pomodoro`] reports, as a snake_case
+/// string over the bridge. `finished` alone cannot tell "a round of work just
+/// ended" from "the rest just ended", and the two need different titles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PomodoroEventKind {
+    FocusFinished,
+    BreakEnding,
+    BreakFinished,
+}
+
 /// What Kotlin gets back. Mirrors [`Event`] plus the derived state the
 /// notification needs, so the service does not have to recompute anything.
 #[derive(Debug, Clone, Serialize)]
@@ -121,8 +132,11 @@ pub enum BridgeEvent {
         /// Whether it should break through do-not-disturb.
         urgent: bool,
     },
-    /// Local pomodoro reached a boundary.
+    /// Local pomodoro reached a boundary. `kind` tells the notifications apart:
+    /// "focus_finished" and "break_finished" used to share one title, which said
+    /// "work is over" right when the user was being asked to start again.
     Pomodoro {
+        kind: PomodoroEventKind,
         phase: String,
         remaining: String,
         finished: bool,
@@ -449,12 +463,13 @@ impl Bridge {
                 let now_met = goal > 0 && self.focus_today_min >= goal;
 
                 self.pending.push(BridgeEvent::Pomodoro {
+                    kind: PomodoroEventKind::FocusFinished,
                     phase: next.label().to_string(),
                     remaining: "00:00".to_string(),
                     finished: true,
                     message: format!(
-                        "专注 {minutes} 分钟完成，今日累计 {} 分钟",
-                        self.focus_today_min
+                        "专注了 {minutes} 分钟，番茄钟工作结束了，该休息了（接下来是{}）",
+                        next.label()
                     ),
                 });
 
@@ -469,12 +484,22 @@ impl Bridge {
 
                 let _ = self.publish();
             }
+            PomodoroEvent::BreakEndingSoon { seconds } => {
+                self.pending.push(BridgeEvent::Pomodoro {
+                    kind: PomodoroEventKind::BreakEnding,
+                    phase: self.pomodoro.state().phase.label().to_string(),
+                    remaining: self.pomodoro.state().remaining_text(synctus_core::now_ms()),
+                    finished: false,
+                    message: format!("休息时间快结束了（还剩 {seconds} 秒），尽快转换为工作状态"),
+                });
+            }
             PomodoroEvent::BreakFinished => {
                 self.pending.push(BridgeEvent::Pomodoro {
+                    kind: PomodoroEventKind::BreakFinished,
                     phase: PomodoroPhase::Idle.label().to_string(),
                     remaining: "00:00".to_string(),
                     finished: true,
-                    message: "休息结束，准备下一回合".to_string(),
+                    message: "休息结束，回到工作状态".to_string(),
                 });
                 let _ = self.publish();
             }
@@ -612,6 +637,10 @@ impl Bridge {
             "pomodoro_remaining": state.remaining_text(now),
             "pomodoro_active": state.phase != PomodoroPhase::Idle,
             "pomodoro_paused": state.paused(),
+            // Ms until the next pomodoro boundary worth waking up for, so the
+            // service can shorten its sleep instead of stepping over the
+            // fifteen-second rest-ending window with a long poll interval.
+            "next_alert_ms": self.pomodoro.next_tick_in_ms(now),
             "completed_today": state.completed_today,
             "connected": matches!(self.conn, ConnState::Online),
             // The accountability line the notification shows.
@@ -1099,6 +1128,45 @@ mod tests {
         let status: serde_json::Value = serde_json::from_str(&bridge.local_status_json()).unwrap();
         assert_eq!(status["focus_today_min"], serde_json::json!(75));
         assert_eq!(status["streak_days"], serde_json::json!(1));
+        bridge.stop();
+    }
+
+    /// The pomodoro event's `kind` is what Android picks the notification title
+    /// (and therefore the reminder's meaning) from, and `next_alert_ms` is what
+    /// lets the service wake up inside the rest-ending window. Both are wire
+    /// format, so pin them here rather than trusting either side.
+    #[test]
+    fn pomodoro_events_carry_their_kind_and_next_alert() {
+        let cfg = ClientConfig {
+            pomodoro: synctus_core::config::PomodoroConfig {
+                focus_min: 25,
+                ..Default::default()
+            },
+            ..paired_config()
+        };
+        let mut bridge = Bridge::with_config(cfg).unwrap();
+
+        // Idle: no deadline worth waking for.
+        let idle: serde_json::Value = serde_json::from_str(&bridge.local_status_json()).unwrap();
+        assert_eq!(idle["next_alert_ms"], serde_json::json!(null));
+
+        bridge.command(r#"{"type":"start_focus"}"#).unwrap();
+        let running: serde_json::Value = serde_json::from_str(&bridge.local_status_json()).unwrap();
+        let until_alert = running["next_alert_ms"].as_i64().expect("deadline present");
+        assert!(
+            (24 * 60_000..=25 * 60_000).contains(&until_alert),
+            "expected ~25min, got {until_alert}"
+        );
+
+        bridge.command(r#"{"type":"skip_phase"}"#).unwrap();
+        let events: Vec<serde_json::Value> = serde_json::from_str(&bridge.poll()).unwrap();
+        let pomodoro = events
+            .iter()
+            .find(|e| e["type"] == serde_json::json!("pomodoro"))
+            .expect("expected a pomodoro event");
+        assert_eq!(pomodoro["kind"], serde_json::json!("focus_finished"));
+        assert_eq!(pomodoro["finished"], serde_json::json!(true));
+        assert!(pomodoro["message"].as_str().unwrap().contains("该休息了"));
         bridge.stop();
     }
 

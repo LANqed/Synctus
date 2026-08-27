@@ -123,8 +123,23 @@ class SyncService : Service() {
             publishSensors()
             drainEvents()
             refreshNotification()
-            delay(intervalMs)
+            delay(nextDelayMs(intervalMs))
         }
+    }
+
+    /**
+     * Sleep until the earlier of the normal poll and the next pomodoro boundary.
+     *
+     * A fixed interval longer than fifteen seconds jumps straight from "plenty
+     * of rest left" to "rest over", and the rest-ending reminder would never
+     * fire. Capping the sleep with the engine's own deadline is what makes the
+     * reminder reliable at any poll interval.
+     */
+    private fun nextDelayMs(intervalMs: Long): Long {
+        val alertIn = state.value.local.nextAlertMs ?: return intervalMs
+        // A one-second floor: process suspension can make the wake-up late, and
+        // a tick that lands inside the window still counts.
+        return minOf(intervalMs, alertIn).coerceIn(1_000L, intervalMs)
     }
 
     /** Read what Android will tell us and hand it to the engine. */

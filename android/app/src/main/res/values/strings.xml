@@ -6,7 +6,9 @@
     <string name="channel_status">同步状态</string>
     <string name="channel_status_desc">常驻通知，显示对方状态并保持后台连接</string>
     <string name="channel_nudge">互动提醒</string>
-    <string name="channel_nudge_desc">对方的敲一敲、番茄钟结束等提醒</string>
+    <string name="channel_nudge_desc">对方的敲一敲等互动提醒</string>
+    <string name="channel_pomodoro">番茄钟提醒</string>
+    <string name="channel_pomodoro_desc">番茄钟工作结束该休息、休息快结束该回工作的提醒（带提示音）</string>
 
     <!-- Ongoing notification -->
     <string name="status_waiting_peer">等待对方上线…</string>
@@ -34,7 +36,9 @@
     <string name="action_pause">暂停</string>
     <string name="action_resume">继续</string>
 
-    <string name="pomodoro_title">番茄钟</string>
+    <string name="pomodoro_title">🍅 番茄钟工作结束了</string>
+    <string name="pomodoro_break_ending_title">☕ 休息时间快结束了</string>
+    <string name="pomodoro_break_finished_title">☕ 休息结束</string>
     <string name="goal_title">🎉 达成目标</string>
     <string name="goal_body">今天的 %1$d 分钟完成了</string>
     <string name="goal_body_streak">今天的 %1$d 分钟完成了，已连续 %2$d 天</string>

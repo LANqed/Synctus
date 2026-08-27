@@ -127,6 +127,8 @@ sealed interface BridgeEvent {
     @Serializable
     @SerialName("pomodoro")
     data class Pomodoro(
+        /** "focus_finished" | "break_ending" | "break_finished"; picks the title. */
+        val kind: String = "focus_finished",
         val phase: String,
         val remaining: String,
         val finished: Boolean,
@@ -193,6 +195,12 @@ data class LocalStatus(
     @SerialName("pomodoro_remaining") val pomodoroRemaining: String = "00:00",
     @SerialName("pomodoro_active") val pomodoroActive: Boolean = false,
     @SerialName("pomodoro_paused") val pomodoroPaused: Boolean = false,
+    /**
+     * Ms until the next pomodoro boundary worth waking for (null = nothing
+     * pending). The service caps its sleep with this so a long poll interval
+     * cannot step over the fifteen-second rest-ending reminder.
+     */
+    @SerialName("next_alert_ms") val nextAlertMs: Long? = null,
     @SerialName("completed_today") val completedToday: Int = 0,
     val connected: Boolean = false,
     // --- accountability ---

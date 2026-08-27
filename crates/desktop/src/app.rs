@@ -358,6 +358,10 @@ impl App {
                 }
                 self.last_published = None;
             }
+            PomodoroEvent::BreakEndingSoon { seconds } => {
+                crate::notify::break_ending_soon(seconds);
+                self.note(format!("休息还剩 {seconds} 秒，尽快转换为工作状态"));
+            }
             PomodoroEvent::BreakFinished => {
                 crate::notify::break_finished();
                 self.note("休息结束");
