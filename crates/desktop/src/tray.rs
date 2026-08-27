@@ -10,7 +10,9 @@
 //! wake-ups of its own.
 
 use anyhow::{Context, Result};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{
+    CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use synctus_core::model::{NudgeKind, Presence};
@@ -26,6 +28,7 @@ mod id {
     pub const POMODORO_SKIP: &str = "pomodoro:skip";
     pub const POMODORO_STOP: &str = "pomodoro:stop";
     pub const OVERLAY_TOGGLE: &str = "overlay:toggle";
+    pub const OVERLAY_PASSTHROUGH: &str = "overlay:passthrough";
     pub const SETTINGS: &str = "settings";
     pub const UPDATE: &str = "update";
     pub const RECONNECT: &str = "reconnect";
@@ -42,6 +45,10 @@ pub struct Tray {
     nag_item: MenuItem,
     /// Shows today's two focus totals; the most useful line in the menu.
     summary_item: MenuItem,
+    /// Mouse passthrough is the one setting that must live in the tray: while it
+    /// is on, the overlay ignores every click, including the one that would turn
+    /// it back off. The check mark is the only visible state, so keep it exact.
+    passthrough_item: CheckMenuItem,
     /// The tooltip is the only always-visible surface when the overlay is hidden,
     /// so it carries the comparison too.
     icon_handle: TrayIcon,
@@ -49,7 +56,10 @@ pub struct Tray {
 
 impl Tray {
     /// Create the tray icon. Must run on the event-loop thread.
-    pub fn new(app_name: &str) -> Result<Self> {
+    ///
+    /// `passthrough` seeds the check mark so the menu never disagrees with the
+    /// restored config, if only for the one frame before the first sync.
+    pub fn new(app_name: &str, passthrough: bool) -> Result<Self> {
         let menu = Menu::new();
 
         // A disabled item used as a header. `muda` has no label widget, so a
@@ -142,6 +152,14 @@ impl Tray {
             None,
         ))
         .ok();
+        let passthrough_item = CheckMenuItem::with_id(
+            id::OVERLAY_PASSTHROUGH,
+            "悬浮窗鼠标穿透",
+            true,
+            passthrough,
+            None,
+        );
+        menu.append(&passthrough_item).ok();
         menu.append(&MenuItem::with_id(id::SETTINGS, "设置…", true, None))
             .ok();
         menu.append(&MenuItem::with_id(id::UPDATE, "检查更新", true, None))
@@ -169,12 +187,18 @@ impl Tray {
             toggle_item,
             nag_item,
             summary_item,
+            passthrough_item,
         })
     }
 
     /// Keep the pomodoro entry's label in sync with the timer.
     pub fn set_pomodoro_label(&self, label: &str) {
         self.toggle_item.set_text(label);
+    }
+
+    /// Reflect the passthrough state in the menu's check mark.
+    pub fn set_passthrough(&self, enabled: bool) {
+        self.passthrough_item.set_checked(enabled);
     }
 
     /// Update the accountability parts of the menu and the tooltip.
@@ -258,6 +282,7 @@ fn map_menu_id(menu_id: &MenuId) -> Option<UiRequest> {
         id::POMODORO_SKIP => UiRequest::SkipPhase,
         id::POMODORO_STOP => UiRequest::StopPomodoro,
         id::OVERLAY_TOGGLE => UiRequest::ToggleOverlay,
+        id::OVERLAY_PASSTHROUGH => UiRequest::ToggleMousePassthrough,
         id::SETTINGS => UiRequest::OpenSettings,
         id::UPDATE => UiRequest::CheckUpdate,
         id::RECONNECT => UiRequest::Reconnect,
@@ -370,6 +395,10 @@ mod tests {
         assert_eq!(
             map_menu_id(&MenuId::new(id::SETTINGS)),
             Some(UiRequest::OpenSettings)
+        );
+        assert_eq!(
+            map_menu_id(&MenuId::new(id::OVERLAY_PASSTHROUGH)),
+            Some(UiRequest::ToggleMousePassthrough)
         );
         assert_eq!(map_menu_id(&MenuId::new("unknown-item")), None);
     }

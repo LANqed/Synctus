@@ -786,6 +786,16 @@ fn connection_tab(ui: &mut egui::Ui, app: &mut App) {
     ui.checkbox(&mut draft.start_minimised, "启动时不显示设置窗口");
     ui.checkbox(&mut draft.show_overlay, "显示悬浮窗");
     ui.checkbox(&mut draft.overlay_always_on_top, "悬浮窗置顶");
+    ui.checkbox(&mut draft.overlay_mouse_passthrough, "悬浮窗鼠标穿透");
+    if draft.overlay_mouse_passthrough {
+        ui.label(
+            egui::RichText::new(
+                "开启后鼠标点击会穿过悬浮窗，落到下面的窗口上；悬浮窗本身无法再拖动或点击。要关掉它请用托盘菜单的同一项。",
+            )
+            .small()
+            .weak(),
+        );
+    }
     ui.checkbox(&mut draft.mute_nudges, "静音互动提醒");
 
     ui.add_space(8.0);

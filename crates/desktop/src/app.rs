@@ -29,6 +29,8 @@ pub enum UiRequest {
     StopPomodoro,
     SkipPhase,
     ToggleOverlay,
+    /// Let clicks pass through the overlay / make it interactive again.
+    ToggleMousePassthrough,
     OpenSettings,
     CheckUpdate,
     Reconnect,
@@ -568,6 +570,9 @@ impl App {
                 self.save_config();
                 false
             }
+            // Handled in `Desktop::handle` before it ever reaches here; the arm
+            // exists only to keep the match exhaustive.
+            UiRequest::ToggleMousePassthrough => false,
             UiRequest::OpenSettings => {
                 self.draft = Some(self.cfg.clone());
                 self.show_settings = true;

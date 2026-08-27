@@ -211,6 +211,12 @@ pub struct ClientConfig {
     pub overlay_y: Option<i32>,
     /// Keep the overlay above other windows.
     pub overlay_always_on_top: bool,
+    /// Let mouse clicks pass through the overlay to whatever is underneath.
+    ///
+    /// A display-only mode: while on, the overlay cannot be dragged or clicked,
+    /// so the tray menu is the way back. Wayland compositors that reject empty
+    /// input regions keep the overlay clickable.
+    pub overlay_mouse_passthrough: bool,
     pub check_updates: bool,
     /// `owner/repo` used for the GitHub release check.
     pub update_repo: String,
@@ -239,6 +245,7 @@ impl Default for ClientConfig {
             overlay_x: None,
             overlay_y: None,
             overlay_always_on_top: true,
+            overlay_mouse_passthrough: false,
             check_updates: true,
             update_repo: "LANqed/Synctus".to_string(),
             mute_nudges: false,

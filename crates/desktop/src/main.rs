@@ -60,6 +60,9 @@ fn main() -> Result<()> {
     if app.cfg.overlay_always_on_top {
         viewport = viewport.with_always_on_top();
     }
+    if app.cfg.overlay_mouse_passthrough {
+        viewport = viewport.with_mouse_passthrough(true);
+    }
     if let (Some(x), Some(y)) = (app.cfg.overlay_x, app.cfg.overlay_y) {
         viewport = viewport.with_position([x as f32, y as f32]);
     }
@@ -103,6 +106,10 @@ struct Desktop {
     /// window close as "hide to tray" — but not when this flag is set, otherwise
     /// the tray's 退出 button would cancel its own close.
     quitting: bool,
+    /// Last passthrough state pushed to the window. Both the tray toggle and the
+    /// settings' Apply land in `app.cfg`; this is the change guard that turns
+    /// the config into a viewport command.
+    mouse_passthrough_applied: bool,
     /// Last label pushed to the tray, to avoid redundant updates.
     last_tray_label: String,
     /// Last accountability values pushed to the tray. Updating a menu item on
@@ -112,6 +119,9 @@ struct Desktop {
 
 impl Desktop {
     fn new(app: App, start_hidden: bool) -> Self {
+        // The builder already applied the restored state; the guard starts in
+        // agreement so the first frame does not send a redundant command.
+        let mouse_passthrough_applied = app.cfg.overlay_mouse_passthrough;
         Self {
             app,
             ui: UiState::default(),
@@ -119,6 +129,7 @@ impl Desktop {
             tray_failed: false,
             overlay_visible: !start_hidden,
             quitting: false,
+            mouse_passthrough_applied,
             last_tray_label: String::new(),
             // Deliberately not the real initial values, so the first sync always
             // pushes something.
@@ -132,7 +143,7 @@ impl Desktop {
         if self.tray.is_some() || self.tray_failed {
             return;
         }
-        match tray::Tray::new("Synctus") {
+        match tray::Tray::new("Synctus", self.app.cfg.overlay_mouse_passthrough) {
             Ok(tray) => self.tray = Some(tray),
             Err(e) => {
                 // A missing StatusNotifier host on Linux is common; the overlay
@@ -193,7 +204,36 @@ impl Desktop {
             return false;
         }
 
+        // Likewise a window concern: it flips the config, and the per-frame sync
+        // below turns that into the viewport command and the tray check mark.
+        if request == UiRequest::ToggleMousePassthrough {
+            self.app.cfg.overlay_mouse_passthrough = !self.app.cfg.overlay_mouse_passthrough;
+            self.app.save_config();
+            return false;
+        }
+
         self.app.handle(request)
+    }
+
+    /// Turn the passthrough config into window behaviour.
+    ///
+    /// Two sources flip the config (tray menu, settings Apply) and one restores
+    /// it (config file at startup, already applied by the viewport builder); the
+    /// guard keeps the command idempotent and the tray's check mark exact
+    /// whichever path changed it.
+    fn sync_mouse_passthrough(&mut self, ctx: &egui::Context) {
+        let enabled = self.app.cfg.overlay_mouse_passthrough;
+        if enabled == self.mouse_passthrough_applied {
+            return;
+        }
+        self.mouse_passthrough_applied = enabled;
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::MousePassthrough(enabled),
+        );
+        if let Some(tray) = self.tray.as_ref() {
+            tray.set_passthrough(enabled);
+        }
     }
 
     /// Remember where the user dragged the overlay.
@@ -247,7 +287,7 @@ impl eframe::App for Desktop {
             if self.handle(&ctx, request) {
                 // Explicit quit: stop rendering the settings window and close the
                 // root viewport. The close-requested handler below must NOT cancel
-                // this, or the tray 退出 button does nothing.
+                // this, or the tray's 退出 button does nothing.
                 self.quitting = true;
                 self.app.show_settings = false;
                 self.app.shutdown();
@@ -255,6 +295,9 @@ impl eframe::App for Desktop {
                 return;
             }
         }
+
+        // After the requests, so a tray toggle takes effect on this frame.
+        self.sync_mouse_passthrough(&ctx);
 
         self.remember_position(&ctx);
 
