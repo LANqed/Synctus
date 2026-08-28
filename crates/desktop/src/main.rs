@@ -221,7 +221,7 @@ impl Desktop {
     /// it (config file at startup, already applied by the viewport builder); the
     /// guard keeps the command idempotent and the tray's check mark exact
     /// whichever path changed it.
-    fn sync_mouse_passthrough(&mut self, ctx: &egui::Context) {
+    fn sync_mouse_passthrough(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let enabled = self.app.cfg.overlay_mouse_passthrough;
         if enabled == self.mouse_passthrough_applied {
             return;
@@ -231,6 +231,20 @@ impl Desktop {
             egui::ViewportId::ROOT,
             egui::ViewportCommand::MousePassthrough(enabled),
         );
+
+        // `ViewportCommand` is normally enough, but on Windows it is applied
+        // through egui's deferred command queue. When this request originates
+        // from the tray while the overlay is already click-through, that queue
+        // can leave the native hit-test style in place. Apply the same state to
+        // winit's root window immediately as a reliable Windows fallback.
+        #[cfg(windows)]
+        if let Some(window) = frame.winit_window() {
+            if let Err(error) = window.set_cursor_hittest(!enabled) {
+                tracing::warn!(%error, enabled, "无法更新悬浮窗鼠标穿透状态");
+                self.app.note("无法更新悬浮窗鼠标穿透状态".to_string());
+            }
+        }
+
         if let Some(tray) = self.tray.as_ref() {
             tray.set_passthrough(enabled);
         }
@@ -256,7 +270,7 @@ impl eframe::App for Desktop {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
         self.ensure_tray();
@@ -297,7 +311,7 @@ impl eframe::App for Desktop {
         }
 
         // After the requests, so a tray toggle takes effect on this frame.
-        self.sync_mouse_passthrough(&ctx);
+        self.sync_mouse_passthrough(&ctx, frame);
 
         self.remember_position(&ctx);
 
