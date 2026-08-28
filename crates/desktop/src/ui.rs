@@ -467,6 +467,8 @@ fn overlay_todos(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) {
     let mut toggled: Option<String> = None;
     let mut removed: Option<String> = None;
     let mut add = false;
+    let todo_limit = app.cfg.overlay_todo_limit();
+    let todo_font_size = app.cfg.overlay_todo_font_size();
 
     // The text field's content lives in `UiState`, not in a local: in immediate
     // mode a local `String::new()` is rebuilt every frame, so every keystroke
@@ -482,18 +484,25 @@ fn overlay_todos(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) {
         add = true;
     }
 
-    for todo in &app.data.todos {
-        ui.horizontal(|ui| {
+    for todo in app.data.todos.iter().take(todo_limit) {
+        ui.horizontal_top(|ui| {
             let mut done = todo.done;
             if ui.checkbox(&mut done, "").changed() {
                 toggled = Some(todo.id.clone());
             }
             let text = if todo.done {
-                egui::RichText::new(&todo.title).strikethrough().weak()
-            } else {
                 egui::RichText::new(&todo.title)
+                    .size(todo_font_size)
+                    .strikethrough()
+                    .weak()
+            } else {
+                egui::RichText::new(&todo.title).size(todo_font_size)
             };
-            ui.label(text);
+            // Reserve room for the delete button, then let the title consume
+            // the rest of the row and wrap instead of spilling out of the
+            // transparent overlay window.
+            let title_width = (ui.available_width() - 26.0).max(40.0);
+            ui.add_sized([title_width, 0.0], egui::Label::new(text).wrap());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("✕").clicked() {
                     removed = Some(todo.id.clone());
@@ -512,11 +521,22 @@ fn overlay_todos(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) {
                     .small()
                     .weak(),
             );
-            for todo in items.iter().take(12) {
+            for todo in items.iter().take(todo_limit) {
                 let mark = if todo.done { "☑" } else { "☐" };
-                ui.label(egui::RichText::new(format!("{mark} {}", todo.title)).small());
+                let text =
+                    egui::RichText::new(format!("{mark} {}", todo.title)).size(todo_font_size);
+                ui.add_sized([ui.available_width(), 0.0], egui::Label::new(text).wrap());
             }
         }
+    }
+
+    let hidden_local = app.data.todos.len().saturating_sub(todo_limit);
+    if hidden_local > 0 {
+        ui.label(
+            egui::RichText::new(format!("还有 {hidden_local} 条待办，请在设置中查看"))
+                .small()
+                .weak(),
+        );
     }
 
     if add {
@@ -1064,6 +1084,29 @@ fn pomodoro_tab(ui: &mut egui::Ui, app: &mut App) {
 }
 
 fn todos_tab(ui: &mut egui::Ui, app: &mut App, state: &mut UiState) {
+    // Overlay appearance belongs in the same place as the list itself. Edits
+    // stay in the settings draft and are only persisted by "保存并应用".
+    if app.draft.is_none() {
+        app.draft = Some(app.cfg.clone());
+    }
+    {
+        let draft = app.draft.as_mut().expect("just ensured");
+
+        ui.label(egui::RichText::new("悬浮窗待办显示").strong());
+        ui.label(
+            egui::RichText::new("长标题会自动换行；完整清单始终可在此页面查看。")
+                .small()
+                .weak(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("显示条数");
+            ui.add(egui::Slider::new(&mut draft.overlay_todo_limit, 1..=12).suffix(" 条"));
+            ui.label("文字大小");
+            ui.add(egui::Slider::new(&mut draft.overlay_todo_font_size, 14.0..=24.0).suffix(" px"));
+        });
+    }
+    ui.separator();
+
     ui.horizontal(|ui| {
         let response = ui.add(
             egui::TextEdit::singleline(&mut state.new_todo)

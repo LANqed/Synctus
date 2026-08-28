@@ -217,6 +217,13 @@ pub struct ClientConfig {
     /// so the tray menu is the way back. Wayland compositors that reject empty
     /// input regions keep the overlay clickable.
     pub overlay_mouse_passthrough: bool,
+    /// Number of to-do items shown for each person in the overlay.
+    ///
+    /// The full list remains available in Settings. Keeping the overlay to four
+    /// items by default makes it useful without letting it grow down the screen.
+    pub overlay_todo_limit: u8,
+    /// To-do text size in the overlay, expressed in egui points.
+    pub overlay_todo_font_size: f32,
     pub check_updates: bool,
     /// `owner/repo` used for the GitHub release check.
     pub update_repo: String,
@@ -246,6 +253,8 @@ impl Default for ClientConfig {
             overlay_y: None,
             overlay_always_on_top: true,
             overlay_mouse_passthrough: false,
+            overlay_todo_limit: 4,
+            overlay_todo_font_size: 16.0,
             check_updates: true,
             update_repo: "LANqed/Synctus".to_string(),
             mute_nudges: false,
@@ -312,6 +321,16 @@ impl ClientConfig {
 
     pub fn peer_stale_ms(&self) -> i64 {
         (self.peer_stale_secs.clamp(15, 3600) * 1000) as i64
+    }
+
+    /// Clamp persisted values so a hand-edited config cannot make the overlay
+    /// unusably crowded or render text at an unreadable size.
+    pub fn overlay_todo_limit(&self) -> usize {
+        self.overlay_todo_limit.clamp(1, 12) as usize
+    }
+
+    pub fn overlay_todo_font_size(&self) -> f32 {
+        self.overlay_todo_font_size.clamp(14.0, 24.0)
     }
 }
 
@@ -394,5 +413,12 @@ mod tests {
         let cfg = ClientConfig::load(&path).unwrap();
         assert_eq!(cfg.server, "a:1");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn overlay_todo_defaults_are_readable_and_compact() {
+        let cfg = ClientConfig::default();
+        assert_eq!(cfg.overlay_todo_limit(), 4);
+        assert_eq!(cfg.overlay_todo_font_size(), 16.0);
     }
 }
